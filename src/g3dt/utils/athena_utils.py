@@ -26,10 +26,14 @@ class AthenaConfig:
         aws_region (str): AWS region for Athena and S3 operations.
         aws_profile (str): AWS profile to use for authentication.
         athena_s3_output (str): S3 location for Athena query output.
+        workgroup (str, optional): Athena workgroup to run queries in. Roles on
+            the platform are scoped to the env's workgroup, so leaving this
+            unset (awswrangler defaults to 'primary') fails under them.
     """
     aws_region: str
     aws_profile: str
     athena_s3_output: str
+    workgroup: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -87,13 +91,16 @@ class AthenaQuery:
         logger.info(f"Running Athena query: {sql}")
         boto3_session = self._get_boto_session()
         try:
-            df = wr.athena.read_sql_query(
+            kwargs = dict(
                 sql=sql,
                 boto3_session=boto3_session,
                 database=athena_database,
                 ctas_approach=ctas_approach,
-                s3_output=self.config.athena_s3_output
+                s3_output=self.config.athena_s3_output,
             )
+            if getattr(self.config, "workgroup", None):
+                kwargs["workgroup"] = self.config.workgroup
+            df = wr.athena.read_sql_query(**kwargs)
             logger.info(
                 f"Athena query completed successfully. Returned {len(df)} rows."
             )
@@ -159,7 +166,7 @@ class AthenaQuery:
                 database=athena_database,
                 table=table_name,
                 boto3_session=boto3_session,
-                workgroup='primary',
+                workgroup=getattr(self.config, "workgroup", None) or 'primary',
                 temp_path=temp_s3_path
             )
             logger.info(
@@ -172,7 +179,7 @@ class AthenaQuery:
             )
             raise
 
-    def find_db_for_model(self, model_name: str) -> Optional[str]:
+    def find_db_for_model(self, model_name: str, databases: Optional[list] = None) -> Optional[str]:
         """
         Search all Athena databases for a table with the given name and return the database name if found.
 
@@ -202,8 +209,14 @@ class AthenaQuery:
         try:
             # Create a session and pass it to wrangler
             boto3_session = self._get_boto_session()
-            databases = wr.catalog.databases(boto3_session=boto3_session)
-            db_list = databases.get('Database', [])
+            if databases:
+                # Scoped search (e.g. the env's own silver/gold DBs from SSM):
+                # deterministic in shared accounts and needs no account-wide
+                # Glue permissions.
+                db_list = list(databases)
+            else:
+                all_dbs = wr.catalog.databases(boto3_session=boto3_session)
+                db_list = all_dbs.get('Database', [])
             for db in db_list:
                 try:
                     # Pass the session to other wrangler calls too

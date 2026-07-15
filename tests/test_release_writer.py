@@ -173,6 +173,8 @@ class TestMainExecutionFlow:
             aws_profile="prod",
             athena_s3_output="s3://prod-athena-logs/",
             release_s3_location="s3://prod-metadata-bucket/",
+            workgroup="prod-wg",
+            search_database=["prod_silver_db"],
             dry_run=False,
             verbose=True
         )

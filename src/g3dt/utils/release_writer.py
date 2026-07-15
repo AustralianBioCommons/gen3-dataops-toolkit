@@ -143,6 +143,10 @@ def parse_args():
                         help="S3 URI for Athena query results (e.g., 's3://athena-results-bucket/').")
     parser.add_argument("--release-s3-location", type=str, required=True,
                         help="S3 location for the release table (e.g., 's3://<metadata-bucket>/').")
+    parser.add_argument("--workgroup", type=str, required=False,
+                        help="Athena workgroup to run queries in (platform roles are workgroup-scoped).")
+    parser.add_argument("--search-database", action="append", default=None,
+                        help="Restrict the model->database search to this DB (repeatable).")
     parser.add_argument("--dry-run", action="store_true", default=False,
                         help="Resolve everything and log the SQL; write nothing.")
     parser.add_argument("-v", "--verbose", action="store_true", default=False,
@@ -161,6 +165,8 @@ def run(
     aws_region: str,
     athena_s3_output: str,
     aws_profile: Optional[str] = None,
+    workgroup: Optional[str] = None,
+    search_databases: Optional[list] = None,
     dry_run: bool = False,
 ) -> None:
     """Write one release row per dbt model (idempotent; see insert_release_row).
@@ -176,7 +182,8 @@ def run(
     athena_config = AthenaConfig(
         aws_region=aws_region,
         aws_profile=aws_profile,
-        athena_s3_output=athena_s3_output
+        athena_s3_output=athena_s3_output,
+        workgroup=workgroup,
     )
 
     dbt_models = get_model_names(dbt_schema_path)
@@ -197,7 +204,7 @@ def run(
 
     for model_name in dbt_models:
         logger.info(f"--- Processing model: {model_name}")
-        db_name = athena_query.find_db_for_model(model_name)
+        db_name = athena_query.find_db_for_model(model_name, databases=search_databases)
         if not db_name:
             logger.warning(f"Database not found for model '{model_name}'. Skipping...")
             continue
@@ -239,6 +246,8 @@ def main():
         aws_region=args.aws_region,
         athena_s3_output=args.athena_s3_output,
         aws_profile=args.aws_profile,
+        workgroup=args.workgroup,
+        search_databases=args.search_database,
         dry_run=args.dry_run,
     )
 

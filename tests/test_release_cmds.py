@@ -92,6 +92,12 @@ def test_release_write_resolves_names_from_ssm(mock_run):
     assert kwargs["data_release_version"] == "1.4.0"
     assert kwargs["commit_id"] == "deadbeef"
     assert kwargs["dry_run"] is False
+    # platform roles are workgroup-scoped; the model search is scoped to the
+    # env's own DBs so shared accounts can't cross-match
+    assert kwargs["workgroup"] == "etl-test"
+    assert kwargs["search_databases"] == [
+        "etl_test_raw_silver_db", "etl_test_raw_gold_db"
+    ]
     # the resolved target is echoed so a build log always shows where rows go
     assert "etl_test_dataops_metadata_db.releases" in result.output
 

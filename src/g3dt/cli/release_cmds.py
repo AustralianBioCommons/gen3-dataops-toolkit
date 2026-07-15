@@ -55,6 +55,12 @@ def write(
             f"(workgroup output {rc.athena_output_location})",
             bold=True,
         )
+        # The env's own silver/gold DBs (from SSM) scope the model->DB search:
+        # deterministic in shared accounts, no account-wide Glue perms needed.
+        search_databases = [
+            db for db in (rc.get("glue/db/rawSilver"), rc.get("glue/db/rawGold"))
+            if db
+        ] or None
         release_writer.run(
             dbt_schema_path=dbt_schema_path,
             release_db=rc.release_db,
@@ -65,6 +71,8 @@ def write(
             aws_region=rc.region,
             athena_s3_output=rc.athena_output_location,
             aws_profile=profile,
+            workgroup=rc.athena_workgroup,
+            search_databases=search_databases,
             dry_run=dry_run,
         )
     except config.ConfigError as exc:
