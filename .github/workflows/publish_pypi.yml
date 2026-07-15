@@ -1,0 +1,40 @@
+# Software release lifecycle: a GitHub Release publishes to PyPI. This is the
+# ONLY path to PyPI, and it has zero AWS side effects — data releases are
+# `data-v*` tags on a project's dbt repo, an entirely separate lifecycle.
+#
+# One-time setup: add a repository secret PYPI_API_TOKEN (a PyPI API token
+# scoped to the gen3-dataops-toolkit project).
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install poetry
+        run: pipx install poetry
+      - name: Check the tag matches pyproject.toml
+        run: |
+          PKG_VERSION=$(poetry version -s)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject version $PKG_VERSION" >&2
+            exit 1
+          fi
+      - name: Run tests
+        run: |
+          poetry install --no-interaction
+          poetry run python3 -m pytest -q
+      - name: Build
+        run: poetry build
+      - name: Publish
+        env:
+          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_API_TOKEN }}
+        run: poetry publish
