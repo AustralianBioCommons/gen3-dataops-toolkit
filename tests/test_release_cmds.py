@@ -170,5 +170,35 @@ def test_config_dbt_env_emits_every_dbt_setting():
     assert "export G3DT_DB_RAW_GOLD=etl_test_raw_gold_db" in out
     assert f"export G3DT_S3_SILVER_DATA_DIR=s3://etl-test-raw-silver-{ACCOUNT}-{REGION}/dbt/" in out
     assert f"export G3DT_S3_GOLD_DATA_DIR=s3://etl-test-raw-gold-{ACCOUNT}-{REGION}/dbt/" in out
-    # no profile configured -> no G3DT_AWS_PROFILE line (ambient credentials)
+    # no profile configured -> ambient credentials and the default dbt target
     assert "G3DT_AWS_PROFILE" not in out
+    assert "G3DT_DBT_TARGET" not in out
+
+
+@mock_aws
+def test_config_dbt_env_selects_local_target_with_profile(tmp_path, monkeypatch):
+    """
+    Inputs:  a marker whose profiles: map covers the env
+    Expected Output: dbt-env additionally exports G3DT_AWS_PROFILE and
+    G3DT_DBT_TARGET=local, selecting the profiles.yml target that carries
+    aws_profile_name — so a laptop run authenticates with the named profile
+    while CodeBuild (no profiles map) stays on ambient credentials.
+    """
+    marker = tmp_path / "g3dt.yaml"
+    marker.write_text(
+        "project: etl\nregion: ap-southeast-2\nprofiles:\n  test: etl_test\n"
+    )
+    monkeypatch.setenv("G3DT_MARKER", str(marker))
+    creds = tmp_path / "aws_credentials"
+    creds.write_text(
+        "[etl_test]\naws_access_key_id = testing\naws_secret_access_key = testing\n"
+    )
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
+    config._load_yaml_cached.cache_clear()
+    resolver.resolve.cache_clear()
+
+    _seed()
+    result = runner.invoke(app, ["config", "dbt-env", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    assert "export G3DT_AWS_PROFILE=etl_test" in result.output
+    assert "export G3DT_DBT_TARGET=local" in result.output

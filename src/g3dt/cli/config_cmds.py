@@ -219,7 +219,10 @@ def dbt_env(
         "G3DT_S3_GOLD_DATA_DIR": f"s3://{rc.get('buckets/rawGold')}/dbt/",
     }
     if profile:
+        # A named profile means a laptop run: select the dbt target that
+        # carries aws_profile_name (CodeBuild/EC2 stay on `default`, ambient).
         values["G3DT_AWS_PROFILE"] = profile
+        values["G3DT_DBT_TARGET"] = "local"
     for key, value in values.items():
         if value is not None:
             typer.echo(f"export {key}={shlex.quote(str(value))}")
