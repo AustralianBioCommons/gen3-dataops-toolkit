@@ -16,6 +16,8 @@ from g3dt.cli import (
     jobs,
     k8s,
     metadata,
+    pipeline_cmds,
+    release_cmds,
     synth,
 )
 
@@ -34,6 +36,8 @@ app.add_typer(indexd_cmds.app, name="indexd")
 app.add_typer(ec2_cmds.app, name="ec2")
 app.add_typer(jobs.app, name="jobs")
 app.add_typer(config_cmds.app, name="config")
+app.add_typer(release_cmds.app, name="release")
+app.add_typer(pipeline_cmds.app, name="pipeline")
 
 
 _DOCS = """\
@@ -69,6 +73,12 @@ Typical release runbook (staging shown; repeat for prod with care)
   3. g3dt jobs logs <run-id> --follow
   4. g3dt k8s restart-etl --env staging
 
+Data releases (the dbt pipeline; see the project's dbt repo)
+  git tag data-v1.4.0 && git push origin data-v1.4.0
+  g3dt pipeline status --env staging           which stage is running/failed
+  g3dt pipeline logs   --env staging --follow  live dbt + release-writer output
+  (the pipeline itself runs `g3dt release write` — no names needed anywhere)
+
 Synthetic data (test only, all local)
   g3dt synth deploy --env test
 
@@ -78,9 +88,9 @@ EC2 / SSM prerequisites
   - Local profile needs: ssm:SendCommand / ssm:GetCommandInvocation,
     s3:GetObject on the log prefix, ec2:Start/Stop/DescribeInstances.
 
-NOT run by this CLI: the Glue jobs (validation, release-JSON) and the CodeBuild
-dbt pipelines. Those are deployed and triggered via the CDK repo and the
-project's dbt repo.
+NOT run by this CLI: the Glue jobs (validation, release-JSON). The CodeBuild
+dbt pipelines are triggered from the project's dbt repo (branch push = CI,
+data-v* tag = release) and watched with `g3dt pipeline status|logs`.
 """
 
 

@@ -182,6 +182,49 @@ def diff(
     raise typer.Exit(1 if drift else 0)
 
 
+@app.command("dbt-env")
+def dbt_env(
+    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+) -> None:
+    """Emit `export` lines for the env's dbt settings (resolved from SSM).
+
+    The dbt template's profiles.yml / dbt_project.yml read their derived names
+    from env_var(); this command is the one source of those values, for both
+    CodeBuild and a laptop:
+
+        eval "$(g3dt config dbt-env --env test)" && dbt build
+    """
+    import shlex
+
+    from g3dt import resolver
+
+    marker = config.load_marker()
+    project = config.require_project(marker)
+    base = config.env_base(env)
+    profile = None if env.endswith("_ec2") else config.aws_profile_for(base, marker)
+    try:
+        rc = resolver.resolve(project, base, profile=profile)
+    except config.ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    values = {
+        "G3DT_REGION": rc.region,
+        "G3DT_ATHENA_WORKGROUP": rc.athena_workgroup,
+        "G3DT_ATHENA_OUTPUT": rc.athena_output_location,
+        "G3DT_DB_RAW_BRONZE": rc.get("glue/db/rawBronze"),
+        "G3DT_DB_RAW_SILVER": rc.get("glue/db/rawSilver"),
+        "G3DT_DB_RAW_GOLD": rc.get("glue/db/rawGold"),
+        "G3DT_S3_SILVER_DATA_DIR": f"s3://{rc.get('buckets/rawSilver')}/dbt/",
+        "G3DT_S3_GOLD_DATA_DIR": f"s3://{rc.get('buckets/rawGold')}/dbt/",
+    }
+    if profile:
+        values["G3DT_AWS_PROFILE"] = profile
+    for key, value in values.items():
+        if value is not None:
+            typer.echo(f"export {key}={shlex.quote(str(value))}")
+
+
 @app.command("set")
 def set_value(
     key: str = typer.Argument(..., help="Bootstrap key: project, region, default_env."),

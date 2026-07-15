@@ -173,6 +173,7 @@ class TestMainExecutionFlow:
             aws_profile="prod",
             athena_s3_output="s3://prod-athena-logs/",
             release_s3_location="s3://prod-metadata-bucket/",
+            dry_run=False,
             verbose=True
         )
         mock_parse_args.return_value = mock_args
@@ -208,5 +209,6 @@ class TestMainExecutionFlow:
             release_db="prod_release_db",
             release_table="dbt_releases",
             release_tag="v2.1",
-            github_sha="f00ba2"
+            github_sha="f00ba2",
+            dry_run=False,
         )
