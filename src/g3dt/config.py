@@ -336,7 +336,9 @@ def _studies_from_s3_cached(project: str, base_env: str, profile: Optional[str])
     from g3dt import resolver
 
     rc = resolver.resolve(project, base_env, profile=profile)
-    session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+    # Explicit region: botocore ignores AWS_REGION (only AWS_DEFAULT_REGION),
+    # so an ambient session on the EC2 box would have no region at all.
+    session = boto3.Session(profile_name=profile, region_name=rc.region)
     try:
         body = session.client("s3").get_object(
             Bucket=rc.metadata_bucket, Key=STUDIES_S3_KEY

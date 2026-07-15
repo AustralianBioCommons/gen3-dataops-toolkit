@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "gen3-dataops-toolkit"
-version = "2.1.0"
+version = "2.1.1"
 description = "Gen3 DataOps toolkit (g3dt): operate SSM-published Gen3 data pipeline environments"
 authors = ["JoshuaHarris391 <harjo391@gmail.com>"]
 readme = "README.md"

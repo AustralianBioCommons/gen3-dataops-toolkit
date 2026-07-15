@@ -127,31 +127,55 @@ class ResolvedConfig:
         return self.params.get(key, default)
 
 
+def _session(profile: Optional[str], region: Optional[str]) -> boto3.Session:
+    """A boto3 session with an EXPLICIT region.
+
+    The region always comes from the marker (file value, or its AWS_REGION
+    env-var override) rather than boto3's own chain: botocore only honours
+    AWS_DEFAULT_REGION, so on the EC2 job box — where user-data exports
+    AWS_REGION and there is no ~/.aws/config — an ambient-chain session has
+    no region at all (NoRegionError).
+    """
+    if region is None:
+        from g3dt.config import load_marker  # late import (config imports us)
+
+        region = load_marker()["region"]
+    return boto3.Session(profile_name=profile, region_name=region)
+
+
 @functools.lru_cache(maxsize=None)
-def resolve(project: str, env: str, profile: Optional[str] = None) -> ResolvedConfig:
+def resolve(
+    project: str,
+    env: str,
+    profile: Optional[str] = None,
+    region: Optional[str] = None,
+) -> ResolvedConfig:
     """Resolve all deployed names for ``project``/``env`` from SSM (cached).
 
-    Cached on ``(project, env, profile)`` for the life of the process, so a
-    single CLI invocation makes exactly one ``get_parameters_by_path``
+    Cached on ``(project, env, profile, region)`` for the life of the process,
+    so a single CLI invocation makes exactly one ``get_parameters_by_path``
     round-trip no matter how many commands ask for a name. Call
     ``resolve.cache_clear()`` in tests.
 
     ``profile`` is the local AWS named profile to authenticate the read (e.g.
     ``etl_test``); ``None`` uses the default credential chain — which is the
     instance profile on the EC2 job box and the build role in CodeBuild.
+    ``region`` defaults to the marker's region.
     """
-    session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+    session = _session(profile, region)
     return ResolvedConfig(
         project=project, env=env, params=_fetch_params(project, env, session=session)
     )
 
 
-def list_envs(project: str, profile: Optional[str] = None) -> list:
+def list_envs(
+    project: str, profile: Optional[str] = None, region: Optional[str] = None
+) -> list:
     """Return the environment names that have an SSM tree under /{project}/.
 
     Reads the parameter names one level down (e.g. ``/etl/test/...`` -> ``test``).
     """
-    session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+    session = _session(profile, region)
     client = session.client("ssm")
     paginator = client.get_paginator("get_parameters_by_path")
     envs = set()

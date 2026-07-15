@@ -142,3 +142,30 @@ def test_list_envs_returns_deployed_envs():
     _seed("etl", "test")
     _seed("etl", "staging")
     assert resolver.list_envs("etl") == ["staging", "test"]
+
+
+@mock_aws
+def test_resolves_with_marker_region_only(tmp_path, monkeypatch):
+    """The EC2-job-box condition: region comes from the marker, nothing else.
+
+    Input: NO AWS_DEFAULT_REGION, no ~/.aws config — only the g3dt.yaml marker
+    carries `region:` (exactly how CDK user-data provisions the box; note that
+    botocore ignores plain AWS_REGION). Expected: resolve() builds its session
+    from the marker's region and succeeds instead of raising NoRegionError.
+    This is the regression test for the 2.1.0 on-box failure.
+    """
+    from g3dt import config
+
+    marker = tmp_path / "g3dt.yaml"
+    marker.write_text("project: etl\nregion: ap-southeast-2\ndefault_env: test\n")
+    monkeypatch.setenv("G3DT_MARKER", str(marker))
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "nonexistent-config"))
+    config._load_yaml_cached.cache_clear()
+
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(Name="/etl/test/meta/region", Value=REGION, Type="String")
+
+    rc = resolver.resolve("etl", "test")
+    assert rc.region == REGION
