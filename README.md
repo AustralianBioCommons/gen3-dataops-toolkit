@@ -62,8 +62,8 @@ There are exactly two kinds of configuration:
 
 - **INPUTS** — human-authored values, committed as
   `config/<projectId>.<env>.json` in the CDK repo and read only by
-  `cdk deploy`. To change a deployed setting (e.g. the dictionary version),
-  edit that file and redeploy — the value flows to SSM.
+  `cdk deploy`. To change what an environment *declares*, edit that file and
+  redeploy — the value flows to SSM.
 - **OUTPUTS** — every resource name the CDK creates plus the mirrored Gen3
   app facts, published to SSM under `/{project}/{env}/...` on deploy. `g3dt`
   reads these live (cached one round-trip per invocation) and never stores
@@ -73,6 +73,35 @@ Because the CLI and the infrastructure read the same parameters, they cannot
 disagree — and because each environment has its own tree (including its own
 `ec2/instanceId`), running a job against the wrong environment's resources is
 structurally impossible.
+
+### Where the data dictionary comes from
+
+Composed from the env's inputs as
+`{dictionary_base_url}/{schema_repo}/refs/tags/{dictionary_version}/{dictionary_path}`.
+Only `schema_repo` and `dictionary_version` are required; `app/dictionary_base_url`
+and `app/dictionary_path` are optional and default to raw GitHub and the schema
+repo's conventional layout, so environments deployed before they existed keep
+working. `g3dt config show --env <env>` prints the composed URL.
+
+### Promoting a dictionary across environments
+
+A dictionary version is *content*, not infrastructure: it changes far more often
+than buckets or clusters do. Rather than a `cdk deploy` per environment per
+version, `dict pull`, `dict upload` and `dict deploy` all accept `--version`:
+
+```bash
+g3dt dict deploy --env test    --version v1.1.7
+g3dt dict deploy --env staging --version v1.1.7   # same tag, no cdk deploy
+```
+
+An override does not persist, so `config show` keeps reporting the declared
+version until the CDK config catches up — `g3dt config diff --env <env>` reports
+exactly that gap and exits 1, so it can gate CI.
+
+Synthetic data is only schema-valid against the dictionary that generated it, so
+`synth generate` records the dictionary version in each batch and `synth upload`
+refuses a batch that doesn't match the version being uploaded (override with
+`--allow-version-mismatch`).
 
 ## Development
 

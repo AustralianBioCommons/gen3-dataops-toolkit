@@ -73,3 +73,30 @@ def test_no_acdc_in_python_code():
             if "acdc" in without_allowed:
                 offenders.append(f"{path.relative_to(SRC)}:{n}: {line.strip()}")
     assert not offenders, "acdc leaked into code:\n" + "\n".join(offenders)
+
+
+def test_dictionary_host_is_not_hardcoded_outside_config():
+    """Input: every file under src/g3dt. Expected: the raw-GitHub host appears
+    only as the DEFAULT_DICT_BASE_URL fallback in config.py.
+
+    Where the dictionary is fetched from is an env input
+    (app/dictionary_base_url, app/dictionary_path). It used to be a literal in
+    cli/dict_cmds.py and in two shell scripts, which had to be edited in lockstep
+    and meant a project hosting its schema elsewhere could not be operated at
+    all. config.py keeps one copy as the default for environments deployed
+    before those inputs existed; anywhere else is a re-coupling regression.
+    """
+    host = "raw.githubusercontent.com"
+    offenders = []
+    for path in SRC.rglob("*"):
+        if not path.is_file() or path.suffix in {".pyc", ".json"}:
+            continue
+        if path.relative_to(SRC) == pathlib.Path("config.py"):
+            continue
+        for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            if host in line:
+                offenders.append(f"{path.relative_to(SRC)}:{n}: {line.strip()}")
+    assert not offenders, (
+        "dictionary host hardcoded outside config.py — resolve it from the "
+        "env's dictionary source inputs instead:\n" + "\n".join(offenders)
+    )

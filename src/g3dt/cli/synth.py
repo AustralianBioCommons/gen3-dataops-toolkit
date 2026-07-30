@@ -15,14 +15,21 @@ working directory (``LLM_PROVIDER`` / ``LLM_MODEL`` / ``LLM_API_KEY_FILE``).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Optional
 
 import typer
 
-from g3dt.config import script_env
+from g3dt.config import (
+    dictionary_filename,
+    dictionary_url,
+    dictionary_version_of,
+    script_env,
+)
 from g3dt.cli._internal import runner, safety
 from g3dt.cli._internal.resolve import env_of
-from g3dt.cli.dict_cmds import SCHEMA_DIR, dict_url
+from g3dt.cli.dict_cmds import SCHEMA_DIR, warn_if_overridden
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -30,6 +37,72 @@ app = typer.Typer(
 )
 
 SYNTH_DIR = Path("~/.g3dt/synth_metadata").expanduser()
+
+#: Written into each generated batch so `synth upload` can tell which dictionary
+#: produced it. A batch is only valid against that dictionary, and the directory
+#: name alone cannot be trusted: --schema and --version are separate options, so
+#: the label is exactly the thing that can be wrong.
+PROVENANCE_FILE = ".g3dt-provenance.json"
+
+
+def _write_provenance(batch_dir: Path, e, ver: str, schema_path: str) -> None:
+    """Record which dictionary produced this batch."""
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    (batch_dir / PROVENANCE_FILE).write_text(
+        json.dumps(
+            {
+                "dictionary_version": ver,
+                "dictionary_url": dictionary_url(e, ver),
+                "schema_file": Path(schema_path).name,
+                "generated_for_env": e.name,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _check_batch_matches_env(batch_dir: Path, e, ver: str, allow_mismatch: bool) -> None:
+    """Refuse to upload a batch generated against a different dictionary.
+
+    Synthetic records are only schema-valid against the dictionary version used
+    to generate them, so pushing a v1.0.0 batch into an environment running
+    v1.1.0 produces data Gen3 may reject or, worse, silently accept as wrong.
+    The environment's own version is the authority here.
+
+    A batch with no provenance file predates this check and cannot be attributed
+    after the fact, so it warns rather than blocks.
+    """
+    marker = batch_dir / PROVENANCE_FILE
+    if not marker.is_file():
+        typer.secho(
+            f"No provenance in {batch_dir} — cannot confirm which dictionary "
+            f"generated it. Proceeding; regenerate the batch to record it.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    batch_version = json.loads(marker.read_text()).get("dictionary_version")
+    if batch_version == ver:
+        return
+    if allow_mismatch:
+        typer.secho(
+            f"Version mismatch allowed by flag: batch was generated against "
+            f"{batch_version}, uploading to {e.name} which runs {ver}.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    typer.secho(
+        f"Refusing to upload: this batch was generated against dictionary "
+        f"{batch_version}, but '{e.name}' runs {ver}. Synthetic data is only "
+        f"valid against the dictionary that produced it.\n"
+        f"Either regenerate for {ver} (g3dt synth generate ... --version {ver}), "
+        f"deploy {batch_version} to '{e.name}' first "
+        f"(g3dt dict deploy --env {e.name} --version {batch_version}), "
+        f"or override with --allow-version-mismatch.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(1)
 
 
 @app.command()
@@ -113,14 +186,34 @@ def generate(
             raise typer.Exit(1)
 
     ver = version or e.dictionary_version
-    schema_path = schema or str(SCHEMA_DIR / f"acdc_schema_{ver}.json")
+    schema_path = schema or str(SCHEMA_DIR / dictionary_filename(e, ver))
+
+    # A batch is only valid against the dictionary that generated it, and the
+    # output directory is named for `ver` -- so an explicit --schema carrying a
+    # different version stamp would silently mislabel the whole batch.
+    if schema:
+        schema_version = dictionary_version_of(Path(schema).name)
+        if schema_version and schema_version != ver:
+            typer.secho(
+                f"--schema is {Path(schema).name} (dictionary {schema_version}) "
+                f"but the batch would be labelled {ver}. Synthetic data is only "
+                f"valid against the dictionary that produced it — pass "
+                f"--version {schema_version}, or drop --schema to use {ver}.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(1)
 
     # Ensure the schema is available locally; pull it if missing.
     if not Path(schema_path).exists():
         typer.secho(f"Schema not found locally; pulling {ver}...", fg=typer.colors.YELLOW)
         runner.run(
-            runner.bash_script("services/dictionary/pull_dict.sh", dict_url(e, ver)),
-            env=script_env(e),
+            runner.bash_script(
+                "services/dictionary/pull_dict.sh",
+                dictionary_url(e, ver),
+                dictionary_filename(e, ver),
+            ),
+            env=script_env(e, ver),
         )
 
     effective_provider = "llm" if llm else provider
@@ -138,8 +231,11 @@ def generate(
         runner.bash_script(
             "services/synthetic_data/generate_synth_metadata.sh", *args
         ),
-        env=script_env(e),
+        env=script_env(e, ver),
     )
+    # Only after a successful generate: runner.run raises on failure, so a
+    # half-written batch is never stamped as valid.
+    _write_provenance(SYNTH_DIR / ver, e, ver, schema_path)
 
 
 @app.command()
@@ -150,11 +246,26 @@ def upload(
     version: str = typer.Option(
         None, "--version", help="Dictionary version dir (default: the env's version)."
     ),
+    allow_version_mismatch: bool = typer.Option(
+        False,
+        "--allow-version-mismatch",
+        help="Upload even if the batch was generated against another dictionary.",
+    ),
 ) -> None:
-    """Upload generated synthetic metadata to Gen3 (reads local files)."""
+    """Upload generated synthetic metadata to Gen3 (reads local files).
+
+    The batch is checked against the dictionary version being uploaded for:
+    synthetic records are only schema-valid against the dictionary that produced
+    them. Defaults to the env's declared version, so the common case verifies
+    against what the environment actually runs.
+    """
     e = env_of(env)
     safety.confirm_prod_strict("synthetic metadata upload", env)
+    # A promoted dictionary (dict deploy --version) leaves SSM behind, so an
+    # explicit --version here is how you say "this env really runs that tag".
+    warn_if_overridden(e, version)
     v = version or e.dictionary_version
+    _check_batch_matches_env(SYNTH_DIR / v, e, v, allow_version_mismatch)
     base_dir = str(SYNTH_DIR / v) + "/"
     args = ["--base-dir", base_dir, "--aws-secret-name", e.aws_secret_name]
     if e.aws_profile:
@@ -163,7 +274,7 @@ def upload(
         runner.python_script(
             "services/synthetic_data/upload_synth_metadata_sheepdog.py", *args
         ),
-        env=script_env(e),
+        env=script_env(e, v),
     )
 
 

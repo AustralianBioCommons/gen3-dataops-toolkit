@@ -29,7 +29,10 @@ DOMAIN="${G3DT_DOMAIN:?G3DT_DOMAIN not set — run via the g3dt CLI}"
 APP_NAME="${G3DT_APP_NAME:?G3DT_APP_NAME not set — run via the g3dt CLI}"
 NAMESPACE="${G3DT_NAMESPACE:?G3DT_NAMESPACE not set — run via the g3dt CLI}"
 CLUSTER_NAME="${G3DT_CLUSTER_NAME:?G3DT_CLUSTER_NAME not set — run via the g3dt CLI}"
-SCHEMA_REPO="${G3DT_SCHEMA_REPO:?G3DT_SCHEMA_REPO not set — run via the g3dt CLI}"
+# Composed by the CLI from app/schema_repo + the optional dictionary source
+# inputs, so this script never builds the URL (one implementation, in Python).
+DICT_URL="${G3DT_DICT_URL:?G3DT_DICT_URL not set — run via the g3dt CLI}"
+DICT_FILENAME="${G3DT_DICT_FILENAME:?G3DT_DICT_FILENAME not set — run via the g3dt CLI}"
 REGION="${G3DT_REGION:-ap-southeast-2}"
 EKS_ARN="${G3DT_EKS_ARN:-}"
 # Downloaded schemas live outside the installed package.
@@ -56,10 +59,10 @@ if ! aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${REGION}" ${R
 fi
 
 echo "==== [1] Pulling dictionary for version ${VERSION} ===="
-bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "https://raw.githubusercontent.com/${SCHEMA_REPO}/refs/tags/${VERSION}/dictionary/prod_dict/acdc_schema.json"
+bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}" "${DICT_FILENAME}"
 
 echo "==== [2] Uploading dictionary to S3: s3://${SCHEMA_S3_URI} ===="
-python3 "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${SCHEMA_DIR}/acdc_schema_${VERSION}.json" "s3://${SCHEMA_S3_URI}"
+python3 "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${SCHEMA_DIR}/${DICT_FILENAME}" "s3://${SCHEMA_S3_URI}"
 
 echo "==== [3] Restarting microservices (schema) ===="
 bash "${ARGO_SCRIPT_DIR}/argocd_restart_schema.sh" -d "${DOMAIN}" -a "${APP_NAME}" -n "${NAMESPACE}"

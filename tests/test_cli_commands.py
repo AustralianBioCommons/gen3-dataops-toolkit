@@ -13,7 +13,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from g3dt.cli.main import app
-from g3dt.config import EnvConfig, StudyConfig
+from g3dt.config import EnvConfig, StudyConfig, dictionary_url
 
 runner = CliRunner()
 
@@ -104,6 +104,55 @@ def test_dict_deploy_wraps_bash_script(mock_run, _env):
     script_env = mock_run.call_args.kwargs["env"]
     assert script_env["G3DT_DICTIONARY_VERSION"] == "v1"
     assert script_env["G3DT_SCHEMA_REPO"] == "Org/schema-repo"
+    # The script no longer builds the URL itself; it reads these.
+    assert script_env["G3DT_DICT_URL"] == dictionary_url(_env_cfg("test"))
+    assert script_env["G3DT_DICT_FILENAME"] == "acdc_schema_v1.json"
+
+
+@patch("g3dt.cli.dict_cmds.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_dict_pull_passes_config_url_and_filename(mock_run, _env):
+    """
+    Inputs:  g3dt dict pull --env test
+    Expected: bash <package>/services/dictionary/pull_dict.sh <url> <basename>
+
+    `dict pull` had no test at all, and nothing asserted the composed URL
+    anywhere. The URL is compared against config.dictionary_url rather than a
+    literal, so this proves the command reads config instead of re-pinning a
+    hardcoded string somewhere new. The explicit basename is what stops
+    pull_dict.sh regexing a version out of the URL to name the file.
+    """
+    result = runner.invoke(app, ["dict", "pull", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[0] == "bash"
+    assert argv[1].endswith("services/dictionary/pull_dict.sh")
+    assert argv[2] == dictionary_url(_env_cfg("test"))
+    assert argv[3] == "acdc_schema_v1.json"
+
+
+@patch("g3dt.cli.dict_cmds.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_dict_deploy_version_flag_overrides_the_declared_version(mock_run, _env):
+    """
+    Inputs:  g3dt dict deploy --env test --version v9.9.9 (env declares v1)
+    Expected: every G3DT_* dictionary variable describes v9.9.9, and the operator
+    is warned that SSM still declares v1.
+
+    This is what makes promotion practical: the same tag can go to test then
+    staging without a `cdk deploy` per environment. The warning matters because
+    the override does not persist -- `config show` keeps reporting v1 until the
+    CDK config catches up, and `config diff` is what reconciles them.
+    """
+    result = runner.invoke(
+        app, ["dict", "deploy", "--env", "test", "--version", "v9.9.9"]
+    )
+    assert result.exit_code == 0, result.output
+    script_env = mock_run.call_args.kwargs["env"]
+    assert script_env["G3DT_DICTIONARY_VERSION"] == "v9.9.9"
+    assert "/refs/tags/v9.9.9/" in script_env["G3DT_DICT_URL"]
+    assert script_env["G3DT_DICT_FILENAME"] == "acdc_schema_v9.9.9.json"
+    assert "SSM says v1" in result.output
 
 
 @patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)

@@ -86,6 +86,10 @@ def show(
     typer.echo(f"  aws_profile        : {e.aws_profile or '(ambient credentials)'}")
     typer.echo(f"  aws_secret_name    : {e.aws_secret_name}")
     typer.echo(f"  dictionary_version : {e.dictionary_version}")
+    # The composed URL, not the three parts: "which dictionary will this env
+    # actually fetch?" now spans schema_repo plus two optional inputs, so showing
+    # the resolved result is what makes the answer checkable before a deploy.
+    typer.echo(f"  dictionary_url     : {config.dictionary_url(e)}")
     typer.echo(f"  schema_s3_uri      : {e.schema_s3_uri}")
     typer.echo(f"  schema_repo        : {e.schema_repo}")
     typer.echo(f"  domain             : {e.domain}")
@@ -239,6 +243,11 @@ def set_value(
     settings — dictionary_version, domain, buckets, ... — are CDK INPUTS: edit
     config/<project>.<env>.json in gen3-aws-data-pipeline and `cdk deploy`;
     the values flow to SSM, which is what every consumer reads.
+
+    The one exception is per-invocation: `dict pull/upload/deploy --version`
+    fetches a different dictionary tag without a redeploy (for promoting one
+    dictionary across environments). That does not persist — `config diff`
+    reports the gap until the CDK config is updated to match.
     """
     try:
         old, new, path = config.set_marker_value(key, value)

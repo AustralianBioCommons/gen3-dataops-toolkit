@@ -31,7 +31,10 @@ DOMAIN="${G3DT_DOMAIN:?G3DT_DOMAIN not set — run via the g3dt CLI}"
 APP_NAME="${G3DT_APP_NAME:?G3DT_APP_NAME not set — run via the g3dt CLI}"
 NAMESPACE="${G3DT_NAMESPACE:?G3DT_NAMESPACE not set — run via the g3dt CLI}"
 CLUSTER_NAME="${G3DT_CLUSTER_NAME:?G3DT_CLUSTER_NAME not set — run via the g3dt CLI}"
-SCHEMA_REPO="${G3DT_SCHEMA_REPO:?G3DT_SCHEMA_REPO not set — run via the g3dt CLI}"
+# Composed by the CLI from app/schema_repo + the optional dictionary source
+# inputs, so this script never builds the URL (one implementation, in Python).
+DICT_URL="${G3DT_DICT_URL:?G3DT_DICT_URL not set — run via the g3dt CLI}"
+DICT_FILENAME="${G3DT_DICT_FILENAME:?G3DT_DICT_FILENAME not set — run via the g3dt CLI}"
 REGION="${G3DT_REGION:-ap-southeast-2}"
 EKS_ARN="${G3DT_EKS_ARN:-}"
 ARGO_SCRIPT_DIR="${SERVICE_DIR}/k8s_ops"
@@ -68,13 +71,10 @@ if ! aws eks update-kubeconfig \
 fi
 
 echo "==== [1] Pulling dictionary for version ${VERSION} ===="
-DICT_URL="https://raw.githubusercontent.com/${SCHEMA_REPO}"
-DICT_URL="${DICT_URL}/refs/tags/${VERSION}"
-DICT_URL="${DICT_URL}/dictionary/prod_dict/acdc_schema.json"
-bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}"
+bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}" "${DICT_FILENAME}"
 
 echo "==== [2] Uploading dictionary to S3: s3://${SCHEMA_S3_URI} ===="
-UPLOAD_DICT_ARGS=("${SCHEMA_DIR}/acdc_schema_${VERSION}.json" "s3://${SCHEMA_S3_URI}")
+UPLOAD_DICT_ARGS=("${SCHEMA_DIR}/${DICT_FILENAME}" "s3://${SCHEMA_S3_URI}")
 # The optional trailing positional is the AWS profile; omit it for ambient credentials.
 if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
     UPLOAD_DICT_ARGS+=("${G3DT_AWS_PROFILE}")
@@ -100,7 +100,7 @@ python3 "${SERVICE_DIR}/synthetic_data/delete_synth_metadata_sheepdog.py" "${DEL
 
 echo "==== [5] Generating new synthetic data for version ${VERSION} (LLM-realistic) ===="
 bash "${SERVICE_DIR}/synthetic_data/generate_synth_metadata.sh" \
-    --schema "${SCHEMA_DIR}/acdc_schema_${VERSION}.json" \
+    --schema "${SCHEMA_DIR}/${DICT_FILENAME}" \
     --version "${VERSION}" \
     --provider llm \
     --num-records "30,60,20,55" \

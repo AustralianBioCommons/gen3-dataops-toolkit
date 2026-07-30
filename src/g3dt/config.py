@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -37,6 +38,17 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 
 DEFAULT_REGION = "ap-southeast-2"
+
+#: Where the data dictionary is fetched from. The URL is composed as
+#: ``{base_url}/{repo}/refs/tags/{version}/{dictionary_path}`` -- ``repo`` is the
+#: env's ``app/schema_repo``, ``version`` its ``app/dictionary_version``.
+#:
+#: ``base_url`` and ``dictionary_path`` are OPTIONAL app inputs
+#: (``app/dictionary_base_url``, ``app/dictionary_path``); these defaults keep an
+#: env deployed before they existed resolving to the URL it always used, so the
+#: keys can be added to the CDK config later without a coordinated release.
+DEFAULT_DICT_BASE_URL = "https://raw.githubusercontent.com"
+DEFAULT_DICT_PATH = "dictionary/prod_dict/acdc_schema.json"
 
 #: Marker locations, most specific first.
 MARKER_PATHS = ("g3dt.yaml", "~/.g3dt/g3dt.yaml", "/etc/g3dt/g3dt.yaml")
@@ -150,7 +162,9 @@ def set_marker_value(key: str, value: str) -> Tuple[Optional[str], str, Path]:
             f"Settable keys: {', '.join(SETTABLE_MARKER_KEYS)}. "
             f"Deployed settings (dictionary_version, domain, ...) are CDK INPUTS: "
             f"edit config/<project>.<env>.json in gen3-aws-data-pipeline and "
-            f"redeploy — the values flow to SSM, not to this file."
+            f"redeploy — the values flow to SSM, not to this file. "
+            f"To use a different dictionary tag right now without redeploying, "
+            f"pass --version to `g3dt dict pull/upload/deploy`."
         )
     path = marker_path()
     if path is None:
@@ -212,6 +226,15 @@ class EnvConfig:
     ec2_instance_id: Optional[str] = None
     ssh_key: Optional[str] = None
     ssh_user: Optional[str] = None
+    # Optional dictionary-source inputs. Real defaults (not None) so a
+    # hand-built EnvConfig still composes a valid URL.
+    dictionary_base_url: str = DEFAULT_DICT_BASE_URL
+    dictionary_path: str = DEFAULT_DICT_PATH
+
+
+def _app_or_default(rc, leaf: str, default: str) -> str:
+    """Read an OPTIONAL ``app/<leaf>`` parameter, treating blank as unset."""
+    return (rc.get(f"app/{leaf}") or "").strip() or default
 
 
 def resolve_env(env: str, project: Optional[str] = None) -> EnvConfig:
@@ -256,7 +279,79 @@ def resolve_env(env: str, project: Optional[str] = None) -> EnvConfig:
         ec2_instance_id=rc.get("ec2/instanceId"),
         ssh_key=(marker.get("ssh_key") if is_ec2 else None),
         ssh_user=(marker.get("ssh_user") if is_ec2 else None),
+        # Optional: absent, and blank-or-whitespace, both fall back to the
+        # default. SSM rejects a truly empty value, so a "blanked out" parameter
+        # arrives as whitespace -- which is truthy, and would otherwise compose a
+        # URL with no host at all. Deliberately NOT in REQUIRED_APP_KEYS: that
+        # gate raises a "re-run cdk deploy" error, which would break every
+        # environment deployed before these keys existed.
+        dictionary_base_url=_app_or_default(
+            rc, "dictionary_base_url", DEFAULT_DICT_BASE_URL
+        ),
+        dictionary_path=_app_or_default(rc, "dictionary_path", DEFAULT_DICT_PATH),
     )
+
+
+def dictionary_url(e: EnvConfig, version: Optional[str] = None) -> str:
+    """Compose the download URL for an environment's data dictionary.
+
+    ``{base_url}/{repo}/refs/tags/{version}/{dictionary_path}``. ``version``
+    overrides the env's ``dictionary_version`` (this backs ``--version``).
+
+    Segments are stripped of leading/trailing slashes so a stray slash in an SSM
+    value cannot produce a ``//`` mid-path (which raw GitHub 404s on); only the
+    *ends* are touched, so the ``//`` in ``https://`` survives.
+
+    The ``refs/tags`` segment is fixed, so this cannot express a branch or a
+    release asset. Both callers go through this function, so switching to a
+    single templated input later is a contained change.
+    """
+    parts = (
+        e.dictionary_base_url,
+        e.schema_repo,
+        "refs/tags",
+        version or e.dictionary_version,
+        e.dictionary_path,
+    )
+    return "/".join(p.strip().strip("/") for p in parts if p)
+
+
+def dictionary_filename(e: EnvConfig, version: Optional[str] = None) -> str:
+    """Local basename for a pulled dictionary, e.g. ``acdc_schema_v1.1.6.json``.
+
+    Derived from ``dictionary_path``'s basename with the version inserted before
+    the extension -- the same rule ``pull_dict.sh`` applies. Callers pass this to
+    that script as its explicit second argument, so the downloaded name is
+    decided here rather than regexed back out of the URL.
+    """
+    v = version or e.dictionary_version
+    # `rsplit` also drops any directory component, so a dictionary_path
+    # containing `..` cannot steer the download out of the schema directory.
+    base = e.dictionary_path.strip().strip("/").rsplit("/", 1)[-1]
+    stem, dot, ext = base.rpartition(".")
+    return f"{stem}_{v}.{ext}" if dot else f"{base}_{v}"
+
+
+#: A version tag as this project writes them: 'v' then a digit, e.g. v1, v1.1.6,
+#: v2.0.0-rc1. Deliberately strict -- a trailing word after an underscore is only
+#: a version claim if it looks like one, or every ``my_draft.json`` would be read
+#: as version "draft".
+_VERSION_TAG_RE = re.compile(r"v\d[\w.+-]*\Z")
+
+
+def dictionary_version_of(filename: str) -> Optional[str]:
+    """Recover the version stamped into a dictionary filename, if any.
+
+    ``acdc_schema_v1.1.6.json`` -> ``v1.1.6``; a name carrying no version-shaped
+    suffix (``my_draft.json``) -> ``None``. Used to catch a ``--schema`` that
+    contradicts ``--version`` before it mislabels a synthetic-data batch; a name
+    that makes no version claim has nothing to contradict.
+    """
+    stem = filename.rsplit("/", 1)[-1].rpartition(".")[0] or filename
+    _, sep, tail = stem.rpartition("_")
+    if sep and _VERSION_TAG_RE.match(tail):
+        return tail
+    return None
 
 
 def list_envs(project: Optional[str] = None) -> List[str]:
@@ -272,19 +367,27 @@ def list_envs(project: Optional[str] = None) -> List[str]:
     return resolver.list_envs(project, profile=profile)
 
 
-def script_env(e: EnvConfig) -> Dict[str, str]:
+def script_env(e: EnvConfig, version: Optional[str] = None) -> Dict[str, str]:
     """Environment variables for a wrapped service script.
 
     The pre-2.0 shell scripts parsed the legacy YAML config themselves with
     ``yq``; now the Python caller resolves everything from SSM and hands it
     over as ``G3DT_*`` variables.
+
+    ``version`` overrides the env's ``dictionary_version`` for this invocation
+    (``--version`` on the dict commands). Passing it here rather than letting the
+    scripts compose a URL keeps Python the single source of truth: the scripts
+    read ``G3DT_DICT_URL``/``G3DT_DICT_FILENAME`` and never build either
+    themselves, so there is only one implementation to keep correct.
     """
     env = dict(os.environ)
     values = {
         "G3DT_ENV": e.name,
         "G3DT_REGION": e.region,
         "G3DT_AWS_PROFILE": e.aws_profile or "",
-        "G3DT_DICTIONARY_VERSION": e.dictionary_version,
+        "G3DT_DICTIONARY_VERSION": version or e.dictionary_version,
+        "G3DT_DICT_URL": dictionary_url(e, version),
+        "G3DT_DICT_FILENAME": dictionary_filename(e, version),
         "G3DT_AWS_SECRET_NAME": e.aws_secret_name,
         "G3DT_SCHEMA_S3_URI": e.schema_s3_uri,
         "G3DT_DOMAIN": e.domain,

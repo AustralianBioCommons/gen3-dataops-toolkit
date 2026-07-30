@@ -73,6 +73,16 @@ Typical release runbook (staging shown; repeat for prod with care)
   3. g3dt jobs logs <run-id> --follow
   4. g3dt k8s restart-etl --env staging
 
+Promoting one dictionary across environments
+  The source repo/path are env inputs; usually only the tag changes, and it
+  changes far more often than infrastructure does. So --version deploys a tag
+  without a `cdk deploy` per env:
+    g3dt dict deploy --env test    --version v1.1.7
+    g3dt dict deploy --env staging --version v1.1.7
+  The override does not persist: `g3dt config show` keeps reporting the declared
+  version, and `g3dt config diff --env <env>` reports the gap (exit 1) until
+  config/<project>.<env>.json is updated to match.
+
 Data releases (the dbt pipeline; see the project's dbt repo)
   git tag data-v1.4.0 && git push origin data-v1.4.0
   g3dt pipeline status --env staging           which stage is running/failed
@@ -81,6 +91,9 @@ Data releases (the dbt pipeline; see the project's dbt repo)
 
 Synthetic data (test only, all local)
   g3dt synth deploy --env test
+  Batches are only schema-valid against the dictionary that generated them, so
+  each one records its dictionary version and `g3dt synth upload` refuses a
+  batch that does not match the version being uploaded.
 
 EC2 / SSM prerequisites
   - The env's job box is created by the CDK (ec2-job-runner stack): SSM-managed,

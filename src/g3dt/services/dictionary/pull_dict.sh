@@ -7,7 +7,11 @@ show_help() {
     echo
     echo "Arguments:"
     echo "  dict_url       The URL to download the dictionary JSON from."
-    echo "  output_file    Optional. The file to save the dictionary as (default: acdc_schema.json)."
+    echo "  output_file    Optional basename. The g3dt CLI always passes this,"
+    echo "                 derived from the env's dictionary source config. When"
+    echo "                 omitted, the name is <stem>_<version>.<ext> with the"
+    echo "                 version read out of the URL's /refs/tags/ segment"
+    echo "                 (or '_unknown' if the URL carries no tag)."
 }
 
 if [[ "$1" == "-h" || "$1" == "--help" || "$#" -lt 1 ]]; then

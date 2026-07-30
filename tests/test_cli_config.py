@@ -211,3 +211,74 @@ def test_aws_profile_for_uses_marker_profiles(marker):
     assert config.aws_profile_for("staging", marker) == "etl_staging"
     assert config.aws_profile_for("staging_ec2", marker) == "etl_staging"
     assert config.aws_profile_for("prod", marker) is None
+
+
+# --------------------------------------------------------------------------- #
+# Dictionary source: optional app inputs, resolved from SSM                    #
+# --------------------------------------------------------------------------- #
+@mock_aws
+def test_dictionary_source_uses_optional_app_inputs():
+    """
+    Inputs:  an env tree with app/dictionary_base_url and app/dictionary_path set
+    Expected: EnvConfig carries them, and the composed URL uses both
+
+    These two inputs are what let the same wheel operate a project whose schema
+    repo is hosted elsewhere or lays out its dictionary differently.
+    """
+    _seed_env("etl", "test")
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(
+        Name="/etl/test/app/dictionary_base_url", Value="https://git.internal", Type="String"
+    )
+    ssm.put_parameter(
+        Name="/etl/test/app/dictionary_path", Value="schemas/dict.json", Type="String"
+    )
+
+    e = config.resolve_env("test")
+    assert e.dictionary_base_url == "https://git.internal"
+    assert e.dictionary_path == "schemas/dict.json"
+    assert config.dictionary_url(e) == (
+        "https://git.internal/Org/schema-repo/refs/tags/v1/schemas/dict.json"
+    )
+
+
+@mock_aws
+def test_dictionary_source_falls_back_when_inputs_absent():
+    """
+    Inputs:  an env tree WITHOUT app/dictionary_base_url or app/dictionary_path
+             (exactly what every already-deployed environment looks like)
+    Expected: the DEFAULT_DICT_* constants, composing the public GitHub URL
+
+    Crucially these keys are NOT in REQUIRED_APP_KEYS: that gate raises a
+    "re-run cdk deploy" error, so requiring them would break every environment
+    deployed before they existed. This test is what pins that promise.
+    """
+    _seed_env("etl", "test")
+
+    e = config.resolve_env("test")
+    assert e.dictionary_base_url == config.DEFAULT_DICT_BASE_URL
+    assert e.dictionary_path == config.DEFAULT_DICT_PATH
+    assert config.dictionary_url(e) == (
+        "https://raw.githubusercontent.com/Org/schema-repo"
+        "/refs/tags/v1/dictionary/prod_dict/acdc_schema.json"
+    )
+
+
+@mock_aws
+def test_dictionary_source_treats_empty_parameter_as_unset():
+    """
+    Inputs:  app/dictionary_base_url published as an empty string
+    Expected: the default is used, not an empty host
+
+    A blanked-out value in the CDK config would otherwise compose
+    '/Org/schema-repo/refs/tags/...' with no scheme or host. Guards the choice
+    of `rc.get(...) or DEFAULT` over `rc.get(..., DEFAULT)`, which would only
+    catch a missing key and not an empty one.
+    """
+    _seed_env("etl", "test")
+    boto3.client("ssm", region_name=REGION).put_parameter(
+        Name="/etl/test/app/dictionary_base_url", Value=" ", Type="String"
+    )
+
+    e = config.resolve_env("test")
+    assert config.dictionary_url(e).startswith("https://raw.githubusercontent.com/")
