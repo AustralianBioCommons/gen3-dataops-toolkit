@@ -1494,3 +1494,264 @@ class TestWriteIcebergToDb:
 
         call_kwargs = mock_to_iceberg.call_args[1]
         assert call_kwargs["table_location"] is None
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-pin behaviour of construct_json (ported from the reference
+# implementation in the legacy monolith, 2026-07-31): a pre-set snapshot_id
+# used to be silently overwritten by an unconditional
+# _get_latest_snapshot_id() call, breaking release reproducibility.
+# ---------------------------------------------------------------------------
+
+from g3dt.utils.athena_utils import AthenaGoldWriter
+
+
+@pytest.mark.parametrize("writer_cls", [AthenaValidationWriter, AthenaGoldWriter])
+def test_construct_json_respects_pinned_snapshot_id(writer_cls, sample_athena_config):
+    """
+    Test that a pre-set snapshot_id is used as-is by construct_json().
+
+    Background:
+        The release-JSON export pins each gold table to the Iceberg snapshot
+        recorded in the releases ledger (writer.snapshot_id = <pin>) so a
+        release is reproducible even after the table gains new snapshots.
+        construct_json() previously called _get_latest_snapshot_id()
+        unconditionally, overwriting the pin — every release silently exported
+        the LATEST data instead of the pinned snapshot, and ran a redundant
+        $snapshots query per table. This test locks in the fix.
+
+    Steps:
+        1. Create a writer and pin writer.snapshot_id = 424242.
+        2. Mock AthenaQuery so the only query returns a small table.
+        3. Call construct_json().
+
+    Expected:
+        - Exactly ONE Athena query runs (the table SELECT — no $snapshots).
+        - The SELECT uses 'FOR VERSION AS OF 424242'.
+        - writer.snapshot_id is still 424242 afterwards.
+    """
+    writer = writer_cls(sample_athena_config, 'test_db', 'test_table')
+    writer.snapshot_id = 424242
+
+    table_df = pd.DataFrame([{'col_a': 1}])
+    mock_athena_query = MagicMock()
+    mock_athena_query.query_athena.return_value = table_df
+
+    with patch('g3dt.utils.athena_utils.AthenaQuery', return_value=mock_athena_query):
+        writer.construct_json()
+
+    assert mock_athena_query.query_athena.call_count == 1
+    executed_sql = mock_athena_query.query_athena.call_args.kwargs["sql"]
+    assert "FOR VERSION AS OF 424242" in executed_sql
+    assert "$snapshots" not in executed_sql
+    assert writer.snapshot_id == 424242
+
+
+@pytest.mark.parametrize("writer_cls", [AthenaValidationWriter, AthenaGoldWriter])
+def test_construct_json_fetches_latest_when_unpinned(writer_cls, sample_athena_config):
+    """
+    Test that an unpinned writer still fetches the latest snapshot first.
+
+    Background:
+        Callers like the validation-JSON Glue job create a fresh writer
+        (snapshot_id=None) and rely on construct_json() to discover the latest
+        snapshot itself (and to leave it on writer.snapshot_id for the S3 key).
+        The snapshot-pin fix must not change this default path.
+
+    Steps:
+        1. Create a writer without setting snapshot_id.
+        2. Mock AthenaQuery to answer the $snapshots query, then the SELECT.
+        3. Call construct_json().
+
+    Expected:
+        - TWO queries run; the first hits the "$snapshots" metadata table.
+        - writer.snapshot_id is populated from the query result.
+    """
+    writer = writer_cls(sample_athena_config, 'test_db', 'test_table')
+    assert writer.snapshot_id is None  # precondition
+
+    snapshot_df = pd.DataFrame({
+        'snapshot_id': ['88888'],
+        'committed_at': ['2025-03-01 12:00:00.000 UTC']
+    })
+    table_df = pd.DataFrame([{'col_a': 1}])
+    mock_athena_query = MagicMock()
+    mock_athena_query.query_athena.side_effect = [snapshot_df, table_df]
+
+    with patch('g3dt.utils.athena_utils.AthenaQuery', return_value=mock_athena_query):
+        writer.construct_json()
+
+    assert mock_athena_query.query_athena.call_count == 2
+    first_sql = mock_athena_query.query_athena.call_args_list[0].kwargs["sql"]
+    assert "$snapshots" in first_sql
+    assert writer.snapshot_id == '88888'
+
+
+def test_gold_construct_json_output_format_unchanged(sample_athena_config):
+    """
+    Test that the gold JSON output format is byte-for-byte stable.
+
+    Background:
+        Release JSON files are consumed by the Gen3 metadata upload, and
+        existing releases in S3 were written with this exact format (4-space
+        indent, ISO datetimes, floats for Decimals, None for NaN, parsed
+        submitter_id link dicts). This test pins the output for a
+        representative mix of value types so refactors cannot silently change
+        the artifact format.
+    """
+    writer = AthenaGoldWriter(sample_athena_config, 'gold_db', 'gold_table')
+    writer.snapshot_id = 1
+
+    table_df = pd.DataFrame([
+        {
+            'amount': Decimal('2.5'),
+            'score': float('nan'),
+            'seen_at': pd.Timestamp('2026-01-02 03:04:05'),
+            'subjects': "{'submitter_id': 'subj-1'}",
+            'name': 'plain',
+        }
+    ])
+    mock_athena_query = MagicMock()
+    mock_athena_query.query_athena.return_value = table_df
+
+    with patch('g3dt.utils.athena_utils.AthenaQuery', return_value=mock_athena_query):
+        json_output = writer.construct_json()
+
+    expected = json.dumps(
+        [
+            {
+                'amount': 2.5,
+                'score': None,
+                'seen_at': '2026-01-02T03:04:05',
+                'subjects': {'submitter_id': 'subj-1'},
+                'name': 'plain',
+            }
+        ],
+        indent=4,
+    )
+    assert json_output == expected
+
+
+def test_format_submitter_id_value_skips_json_loads_for_plain_strings(athena_validation_writer_instance):
+    """
+    Test the cheap shape guard in _format_submitter_id_value.
+
+    Background:
+        This method runs on EVERY cell of every exported table (millions of
+        cells per run). It used to attempt json.loads on every string cell
+        inside a try/except — measured at ~20x the cost of a startswith check,
+        with ~95% of the time spent raising/catching on ordinary strings that
+        could never be link dicts.
+
+    Inputs & Expected:
+        - "hello world" and "12345"  -> returned unchanged, json.loads NOT called.
+        - '{"submitter_id": "s1"}'   -> parsed to a dict.
+        - ' [{"submitter_id": "s1"}]' (leading space) -> parsed to a list.
+    """
+    writer = athena_validation_writer_instance
+
+    with patch('g3dt.utils.athena_utils.json.loads') as mock_loads:
+        assert writer._format_submitter_id_value("hello world") == "hello world"
+        assert writer._format_submitter_id_value("12345") == "12345"
+        mock_loads.assert_not_called()
+
+    assert writer._format_submitter_id_value('{"submitter_id": "s1"}') == {"submitter_id": "s1"}
+    assert writer._format_submitter_id_value(' [{"submitter_id": "s1"}]') == [{"submitter_id": "s1"}]
+
+
+@pytest.mark.parametrize("scoped", [True, False])
+@patch('g3dt.utils.athena_utils.wr')
+@patch('g3dt.utils.athena_utils.boto3.Session')
+def test_find_db_for_model_skips_ci_databases(mock_boto_session, mock_wr, scoped, athena_query_instance):
+    """
+    Test that find_db_for_model never matches a model in a ci_ database.
+
+    Background:
+        CI dbt builds are isolated into ci_-prefixed Glue databases that
+        contain the SAME model names as the real warehouse. The release
+        writer uses find_db_for_model to locate each model before pinning its
+        snapshot — matching the CI copy would pin a release to a CI-build
+        snapshot. ci_ databases must be invisible to this search on BOTH
+        paths: the scoped databases= list and the account-wide catalog walk.
+
+    Steps:
+        1. Present ['ci_proj_test_raw_gold_db', 'proj_test_raw_gold_db'],
+           both containing 'gold_model', with the ci_ database FIRST.
+        2. Call find_db_for_model, scoped and unscoped.
+
+    Expected:
+        - Returns the real database, and get_tables is never called for the
+          ci_ database.
+    """
+    mock_session_instance = MagicMock()
+    mock_boto_session.return_value = mock_session_instance
+    dbs = ['ci_proj_test_raw_gold_db', 'proj_test_raw_gold_db']
+    mock_wr.catalog.databases.return_value = {'Database': dbs}
+    mock_wr.catalog.get_tables.return_value = [{'Name': 'gold_model'}]
+
+    result = athena_query_instance.find_db_for_model(
+        'gold_model', databases=dbs if scoped else None
+    )
+
+    assert result == 'proj_test_raw_gold_db'
+    assert mock_wr.catalog.get_tables.call_count == 1
+    mock_wr.catalog.get_tables.assert_called_once_with(
+        database='proj_test_raw_gold_db', boto3_session=mock_session_instance
+    )
+
+
+@patch('g3dt.utils.athena_utils.boto3.client')
+def test_write_release_jsons_to_s3_uses_injected_client_and_prefix(mock_boto_client):
+    """
+    Test client injection and prefix override on the release S3 writer.
+
+    Background:
+        The release-JSON export writes files from multiple threads. boto3
+        clients created from the default session are not thread-safe to
+        construct concurrently, so each worker passes its own client. The
+        key_prefix override lets a verification harness write a parity tree
+        without touching the real release artifacts.
+    """
+    injected = MagicMock()
+
+    write_release_jsons_to_s3(
+        s3_bucket='bucket',
+        release_id='v1.0.0',
+        study_id='study1',
+        table_name='study1_subject',
+        json_data='[]',
+        s3_client=injected,
+        key_prefix='release_jsons_verify',
+    )
+
+    mock_boto_client.assert_not_called()
+    key = injected.put_object.call_args.kwargs['Key']
+    assert key.startswith('release_jsons_verify/v1.0.0/study1/')
+
+
+@patch('g3dt.utils.athena_utils.boto3.client')
+def test_write_validation_json_to_s3_uses_injected_client_and_prefix(mock_boto_client):
+    """
+    Test client injection and prefix override on the validation S3 writer.
+
+    Background:
+        Same threading rationale as the release writer — the validation-JSON
+        Glue job exports tables concurrently and each worker owns its client.
+    """
+    injected = MagicMock()
+
+    write_validation_json_to_s3(
+        s3_bucket='bucket',
+        study_id='study1',
+        validation_id='20260731000000',
+        table_name='silver_study1_demographic',
+        snapshot_id=777,
+        json_data='[]',
+        s3_client=injected,
+        key_prefix='validation_verify',
+    )
+
+    mock_boto_client.assert_not_called()
+    key = injected.put_object.call_args.kwargs['Key']
+    assert key.startswith('validation_verify/study_id=study1/validation_id=20260731000000/')
+    assert 'snapshot_id=777' in key

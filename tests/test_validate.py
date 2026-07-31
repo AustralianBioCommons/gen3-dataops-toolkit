@@ -439,3 +439,142 @@ class TestValidatePipeline:
         assert iceberg_call_kwargs["database"] == "test_db"
         assert iceberg_call_kwargs["table"] == "full_validation_results"
         assert iceberg_call_kwargs["athena_s3_output"] == "s3://bucket/athena-output/"
+
+
+@patch(f"{MODULE_PATH}.write_iceberg_to_db")
+@patch(f"{MODULE_PATH}.write_df_to_s3")
+@patch(f"{MODULE_PATH}.gen3_validator.validate.validate_list_dict")
+@patch(f"{MODULE_PATH}.download_s3_files_to_temp_dir")
+@patch(f"{MODULE_PATH}.get_latest_validation_for_study")
+@patch(f"{MODULE_PATH}.create_metadata_table")
+@patch(f"{MODULE_PATH}.load_schema_from_s3_uri")
+@patch(f"{MODULE_PATH}.os.listdir")
+@patch("builtins.open", new_callable=mock_open, read_data='[{"id": "t", "type": "sample"}]')
+def test_validate_pipeline_uses_injected_invariants(
+    mock_file,
+    mock_listdir,
+    mock_load_schema,
+    mock_create_metadata,
+    mock_get_latest,
+    mock_download,
+    mock_validate_list_dict,
+    mock_write_df,
+    mock_write_iceberg,
+):
+    """
+    Test that pre-loaded schema/resolver/metadata are used without re-loading.
+
+    Background:
+        The validator Glue job loops over every study in an environment. The
+        schema download + resolution and the full listing of the validation
+        S3 prefix are identical for every study, yet were previously re-done
+        per study — N schema downloads and N full-prefix LIST scans (over a
+        prefix that grows with every historical run). validate_pipeline now
+        accepts the pre-computed values; when supplied, the loaders must NOT
+        run. The end-to-end test cannot catch this (it only checks the output
+        DataFrame), so this test asserts the call counts directly.
+
+    Expected:
+        - load_schema_from_s3_uri and create_metadata_table are NEVER called.
+        - write_iceberg_to_db is NOT called (write_iceberg=False defers it).
+        - The results DataFrame is returned (1 row here).
+    """
+    mock_listdir.return_value = ["sample.json"]
+    mock_get_latest.return_value = (
+        pd.DataFrame({"s3_uri": ["s3://b/validation/x_sample.json"]}),
+        "20260731000000",
+    )
+    mock_download.return_value = ("/tmp/fake", ["/tmp/fake/sample.json"])
+    mock_validate_list_dict.return_value = [{
+        "index": 0, "node": "sample", "validation_result": "PASS",
+        "invalid_key": None, "schema_path": None, "validator": None,
+        "validator_value": None, "validation_error": None,
+    }]
+    resolver_mock = MagicMock()
+    resolver_mock.schema_resolved = {"sample": {}}
+    resolver_mock.get_schema_version.return_value = "v9.9.9"
+
+    from g3dt.validate.validate import validate_pipeline
+
+    df = validate_pipeline(
+        study_id="study1",
+        schema_s3_uri="s3://bucket/schema.json",
+        validation_s3_uri="s3://bucket/validation/",
+        write_back_root="s3://bucket/validation/",
+        glue_database="db",
+        athena_s3_output="s3://bucket/athena/",
+        schema={"nodes": []},
+        resolver=resolver_mock,
+        metadata_table=pd.DataFrame({"study_id": ["study1"], "validation_id": ["x"], "s3_uri": ["s3://b/v/x.json"]}),
+        write_iceberg=False,
+    )
+
+    mock_load_schema.assert_not_called()
+    mock_create_metadata.assert_not_called()
+    mock_write_iceberg.assert_not_called()
+    mock_write_df.assert_called_once()
+    assert len(df) == 1
+    assert df.iloc[0]["schema_version"] == "v9.9.9"
+
+
+def test_validate_pipeline_rejects_schema_without_resolver():
+    """
+    Test the schema/resolver pairing guard.
+
+    Background:
+        The schema dict and the resolved resolver must describe the SAME
+        schema — supplying one without the other risks validating against a
+        different schema version than is recorded in the results. Fail fast.
+    """
+    from g3dt.validate.validate import validate_pipeline
+
+    with pytest.raises(ValueError, match="together"):
+        validate_pipeline(
+            study_id="s", schema_s3_uri="s3://b/s.json",
+            validation_s3_uri="s3://b/v/", write_back_root="s3://b/v/",
+            glue_database="db", athena_s3_output="s3://b/a/",
+            schema={"nodes": []}, resolver=None,
+        )
+
+
+@patch("g3dt.utils.athena_utils.AthenaQuery")
+def test_run_validation_gate_builds_expected_query(mock_query_cls):
+    """
+    Test the validation gate query construction and result pass-through.
+
+    Background:
+        After the validator writes results to Athena, the gate checks the
+        LATEST validation run for real failures — excluding known-noise error
+        patterns (None-type artefacts, additional-properties, the 'programs'
+        root requirement) and synthetic studies. The validator Glue job fails
+        when rows come back, so the validation Step Function goes red until
+        the data is fixed and re-validated: a green run means clean data.
+
+    Expected:
+        - The SQL targets the results table at MAX(validation_id).
+        - All three noise patterns and the synthetic exclusion are present.
+        - The function returns the query result unchanged.
+    """
+    from g3dt.validate.validate import run_validation_gate
+
+    result_df = pd.DataFrame([
+        {"node": "sample", "study_id": "study1", "invalid_key": "k",
+         "validator_value": "v", "validation_error": "bad", "n": 3},
+    ])
+    mock_query = MagicMock()
+    mock_query.query_athena.return_value = result_df
+    mock_query_cls.return_value = mock_query
+
+    out = run_validation_gate(
+        "proj_test_validation_db", "s3://bucket/athena/",
+        aws_region="ap-southeast-2", workgroup="proj-test",
+    )
+
+    sql = mock_query.query_athena.call_args.kwargs["sql"]
+    assert "MAX(validation_id)" in sql
+    assert '"proj_test_validation_db"."full_validation_results"' in sql
+    assert "'%None is not%'" in sql
+    assert "'%Additional properties are not%'" in sql
+    assert "'%''programs'' is a required property%'" in sql
+    assert "study_id NOT LIKE '%synthetic%'" in sql
+    assert out is result_df

@@ -74,6 +74,45 @@ disagree — and because each environment has its own tree (including its own
 `ec2/instanceId`), running a job against the wrong environment's resources is
 structurally impossible.
 
+
+## CI isolation and the release contract
+
+**Only the dbt template's `ci` target is prefixed.** `g3dt config dbt-env`
+emits, alongside the real names, the CI-isolation variants the template's
+`ci` target consumes: `G3DT_DB_RAW_SILVER_CI` / `G3DT_DB_RAW_GOLD_CI`
+(`ci_` + the real database name) and `G3DT_S3_SILVER_DATA_DIR_CI` /
+`G3DT_S3_GOLD_DATA_DIR_CI` (`dbt_ci/` under the same buckets). Commit-
+triggered CI builds land there; every other target (default, local) and the
+release build keep the real, unprefixed names — so CI can never advance the
+warehouse's Iceberg snapshots that releases pin. The library enforces the
+other half: `find_db_for_model` always skips `ci_`-prefixed databases, so
+`g3dt release write` can never pin a release to a CI-build snapshot.
+
+**Snapshot pinning.** `AthenaValidationWriter.construct_json` /
+`AthenaGoldWriter.construct_json` honour a pre-set `snapshot_id` (reading the
+table `FOR VERSION AS OF` that snapshot) and only fetch the latest snapshot
+when unpinned — the contract the release-JSON export relies on for
+reproducible releases.
+
+**Concurrency.** `release_writer.run` processes models with a bounded thread
+pool (`max_workers`, default 8) and fails at the end naming every failed
+model (inserts are idempotent — re-run to fill the remainder). The S3
+writers (`write_release_jsons_to_s3`, `write_validation_json_to_s3`) accept
+`s3_client=` (pass one per worker thread) and `key_prefix=` (write a
+verification tree without touching real artifacts).
+
+**The validation gate.** `g3dt.validate.run_validation_gate(glue_database,
+athena_s3_output, aws_region, workgroup)` queries the latest
+`validation_id` in `full_validation_results` for REAL failures — the
+known-noise patterns in `VALIDATION_GATE_IGNORED_ERRORS` and synthetic
+studies are excluded. The validator Glue job fails when rows come back, so a
+green validation Step Function means schema-clean data; the operator loop is
+gate fails -> inspect the results table -> fix data -> re-run until green.
+`validate_pipeline` also accepts pre-computed loop-invariants
+(`schema=`/`resolver=`/`metadata_table=`) and `write_iceberg=False` so a
+multi-study caller resolves the schema once, lists the validation prefix
+once, and batches all studies into a single Iceberg INSERT.
+
 ### Where the data dictionary comes from
 
 Composed from the env's inputs as

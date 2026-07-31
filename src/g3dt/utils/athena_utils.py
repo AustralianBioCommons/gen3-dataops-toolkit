@@ -204,6 +204,9 @@ class AthenaQuery:
             - Requires AWS credentials and permissions to list Athena databases and tables.
             - Uses the awswrangler (wr) library.
             - The AWS region is determined from config.aws_region.
+            - Databases prefixed 'ci_' are always skipped: they hold isolated
+              CI dbt builds and contain the same model names as the real
+              warehouse — matching one would pin a release to a CI snapshot.
 
         """
         try:
@@ -218,6 +221,8 @@ class AthenaQuery:
                 all_dbs = wr.catalog.databases(boto3_session=boto3_session)
                 db_list = all_dbs.get('Database', [])
             for db in db_list:
+                if db.startswith("ci_"):
+                    continue
                 try:
                     # Pass the session to other wrangler calls too
                     tables = wr.catalog.get_tables(database=db, boto3_session=boto3_session)
@@ -337,8 +342,12 @@ def convert_dataframe_types_for_json(df: pd.DataFrame) -> pd.DataFrame:
     """
     df_copy = df.copy()
     for col in df_copy.columns:
-        # Handle Decimal objects first, converting them to float
-        if any(isinstance(x, Decimal) for x in df_copy[col].dropna()):
+        # Handle Decimal objects first, converting them to float. Decimals can
+        # only appear in object-dtype columns, so skip the per-value scan for
+        # numeric/datetime columns.
+        if pd.api.types.is_object_dtype(df_copy[col].dtype) and any(
+            isinstance(x, Decimal) for x in df_copy[col].dropna()
+        ):
             df_copy[col] = df_copy[col].apply(
                 lambda x: float(x) if isinstance(x, Decimal) else x
             )
@@ -556,7 +565,14 @@ class AthenaValidationWriter:
         """
         if not isinstance(submitter_id_value, str):
             return submitter_id_value
-        
+
+        # Cheap shape guard: only dict/list-shaped strings can ever parse to a
+        # dict or list, and this method is called on EVERY cell of the frame.
+        # Without this, non-link cells each pay a failing json.loads plus
+        # exception handling (~20x the cost of this check, measured).
+        if not submitter_id_value.lstrip().startswith(("{", "[")):
+            return submitter_id_value
+
         # Try JSON parsing first (handles both dicts and lists with escaped quotes)
         try:
             parsed = json.loads(submitter_id_value)
@@ -592,25 +608,30 @@ class AthenaValidationWriter:
         Returns:
             str: Formatted JSON string with all records, ready for saving to file or S3.
 
+        Snapshot pinning: if ``self.snapshot_id`` was set before calling, the
+        table is read at that exact snapshot (``FOR VERSION AS OF``). Only when
+        it is None is the latest snapshot fetched and stored on the instance.
+
         Steps:
-            1. Fetch latest study_id and snapshot_id for the table.
-            2. Retrieve all table rows.
+            1. Resolve the snapshot_id (pinned value, or fetch latest if unset).
+            2. Retrieve all table rows at that snapshot.
             3. For each row, update/add 'snapshot_id' and 'study_id', and parse any
                stringified dict fields (e.g., submitter_id link columns).
             4. Serialize rows as a pretty JSON string.
         """
-        logger.info("Getting latest snapshot_id")
-        self._get_latest_snapshot_id()
-        
+        if self.snapshot_id is None:
+            logger.info("No snapshot_id pinned; fetching latest snapshot_id")
+            self._get_latest_snapshot_id()
+        else:
+            logger.info(f"Using pinned snapshot_id: {self.snapshot_id}")
+
         logger.info("Constructing JSON data from Athena table...")
         full_table = self._get_full_table()
 
-        if hasattr(full_table, "to_dict"):
-            full_table_json = full_table.to_dict(orient="records")
-        else:
+        if not hasattr(full_table, "to_dict"):
             logger.error("Expected a pandas DataFrame from _get_full_table(), but got type: %s", type(full_table))
             raise ValueError("Unable to convert table to JSON, not a DataFrame.")
-        
+
         # Convert data types to JSON-serialisable formats
         logger.info("Converting DataFrame types for JSON serialisation...")
         full_table = convert_dataframe_types_for_json(full_table)
@@ -652,16 +673,22 @@ class AthenaGoldWriter(AthenaValidationWriter):
           - Retrieve the full gold table (via _get_full_table())
           - Attempt to parse stringified dict fields just as in the parent, but may need table-specific logic
           - Serialize as a pretty JSON string
+
+        Snapshot pinning: if ``self.snapshot_id`` was set before calling (as the
+        release-JSON export does with the snapshot recorded in the releases
+        ledger), the table is read at that exact snapshot. Only when it is None
+        is the latest snapshot fetched.
         """
-        logger.info("Getting latest snapshot_id")
-        self._get_latest_snapshot_id()
-        
+        if self.snapshot_id is None:
+            logger.info("No snapshot_id pinned; fetching latest snapshot_id")
+            self._get_latest_snapshot_id()
+        else:
+            logger.info(f"Using pinned snapshot_id: {self.snapshot_id}")
+
         logger.info("Constructing JSON data from Athena GOLD table...")
         full_table = self._get_full_table()
 
-        if hasattr(full_table, "to_dict"):
-            full_table_json = full_table.to_dict(orient="records")
-        else:
+        if not hasattr(full_table, "to_dict"):
             logger.error("Expected a pandas DataFrame from _get_full_table(), but got type: %s", type(full_table))
             raise ValueError("Unable to convert table to JSON, not a DataFrame.")
 
@@ -711,7 +738,9 @@ def write_validation_json_to_s3(s3_bucket,
                 validation_id,
                 table_name,
                 snapshot_id,
-                json_data):
+                json_data,
+                s3_client=None,
+                key_prefix="validation"):
     """
     Writes the supplied JSON data to an S3 bucket using the specified logical path and metadata.
 
@@ -722,9 +751,15 @@ def write_validation_json_to_s3(s3_bucket,
         table_name (str): Source Athena table name.
         snapshot_id (str): Table snapshot ID (for versioning).
         json_data (str): The JSON-serialized string to be uploaded.
+        s3_client: Optional pre-built boto3 S3 client. Pass one per thread when
+            calling concurrently — creating clients from the default session is
+            not thread-safe. Defaults to a fresh client.
+        key_prefix (str): Top-level S3 key prefix. Defaults to "validation";
+            override to write a verification tree without touching the real
+            validation artifacts.
 
     The S3 object key is formatted as:
-        validation/study_id=<study_id>/validation_id=<validation_id>/table_name=<table_name>/snapshot_id=<snapshot_id>/<table_name>.json
+        <key_prefix>/study_id=<study_id>/validation_id=<validation_id>/table_name=<table_name>/snapshot_id=<snapshot_id>/<table_name>.json
 
     Side Effects:
         Uploads (puts) the JSON data to the given S3 bucket.
@@ -735,8 +770,8 @@ def write_validation_json_to_s3(s3_bucket,
     Logging:
         Logs both intent and completion of S3 upload.
     """
-    s3 = boto3.client('s3')
-    s3_object_key = f"validation/study_id={study_id}/validation_id={validation_id}/table_name={table_name}/snapshot_id={snapshot_id}/{table_name}.json"
+    s3 = s3_client or boto3.client('s3')
+    s3_object_key = f"{key_prefix}/study_id={study_id}/validation_id={validation_id}/table_name={table_name}/snapshot_id={snapshot_id}/{table_name}.json"
     logger.info(f"Writing JSON data to S3 bucket: {s3_bucket}, object key: {s3_object_key}")
     s3.put_object(Body=json_data, Bucket=s3_bucket, Key=s3_object_key)
     logger.info(f"Object created at s3://{s3_bucket}/{s3_object_key}")
@@ -810,7 +845,8 @@ def construct_data_import_order(s3_uri) -> list:
     dd.calculate_node_order()
     return dd.node_order
 
-def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_data):
+def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_data,
+                              s3_client=None, key_prefix="release_jsons"):
     """
     Write a JSON string to a specific S3 location for a given release and study.
 
@@ -820,6 +856,12 @@ def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_
         study_id (str): Study identifier used in the S3 key path.
         table_name (str): Table name (used for naming the .json file).
         json_data (str): JSON data (as a string) to be uploaded.
+        s3_client: Optional pre-built boto3 S3 client. Pass one per thread when
+            calling concurrently — creating clients from the default session is
+            not thread-safe. Defaults to a fresh client.
+        key_prefix (str): Top-level S3 key prefix. Defaults to "release_jsons";
+            override to write a verification tree without touching the real
+            release artifacts.
 
     Returns:
         str: The output directory path in S3 where the file was written.
@@ -830,7 +872,7 @@ def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_
     Example:
         >>> output_dir = write_release_jsons_to_s3('my-bucket', 'release123', 'study1', 'gold_foo', '{"x":1}')
     """
-    s3 = boto3.client('s3')
+    s3 = s3_client or boto3.client('s3')
 
     filename = table_name
     study_name = study_id.split("/")[-1]
@@ -839,7 +881,7 @@ def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_
     else:
         logger.warning(f"Filename {filename} does not start with study_name {study_name}, writing filename as {filename}")
 
-    output_dir = f"release_jsons/{release_id}/{study_id}"
+    output_dir = f"{key_prefix}/{release_id}/{study_id}"
     s3_object_key = f"{output_dir}/{filename}.json"
     logger.info(f"Writing JSON data to S3 bucket: {s3_bucket}, object key: {s3_object_key}")
     s3.put_object(Body=json_data, Bucket=s3_bucket, Key=s3_object_key)

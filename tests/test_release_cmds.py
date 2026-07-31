@@ -208,3 +208,78 @@ def test_config_dbt_env_selects_local_target_with_profile(tmp_path, monkeypatch)
     assert result.exit_code == 0, result.output
     assert "export G3DT_AWS_PROFILE=etl_test" in result.output
     assert "export G3DT_DBT_TARGET=local" in result.output
+
+
+@mock_aws
+def test_config_dbt_env_emits_ci_isolation_vars():
+    """
+    Inputs:  g3dt config dbt-env --env test
+    Expected Output: alongside the real names, the CI-isolation variants —
+    ci_-prefixed database names and dbt_ci/ data dirs — that the dbt
+    template's `ci` target consumes. The REAL names must stay unprefixed
+    (the CI-isolation invariant: only the ci target is prefixed).
+
+    Background:
+        Commit-triggered CI dbt builds are isolated into ci_<real-db-name>
+        Glue databases with data under s3://<same-bucket>/dbt_ci/, so CI can
+        never advance the warehouse's Iceberg snapshots that releases pin.
+    """
+    _seed()
+    result = runner.invoke(app, ["config", "dbt-env", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "export G3DT_DB_RAW_SILVER_CI=ci_etl_test_raw_silver_db" in out
+    assert "export G3DT_DB_RAW_GOLD_CI=ci_etl_test_raw_gold_db" in out
+    assert f"export G3DT_S3_SILVER_DATA_DIR_CI=s3://etl-test-raw-silver-{ACCOUNT}-{REGION}/dbt_ci/" in out
+    assert f"export G3DT_S3_GOLD_DATA_DIR_CI=s3://etl-test-raw-gold-{ACCOUNT}-{REGION}/dbt_ci/" in out
+    # the real names remain unprefixed
+    assert "export G3DT_DB_RAW_SILVER=etl_test_raw_silver_db" in out
+    assert "export G3DT_DB_RAW_GOLD=etl_test_raw_gold_db" in out
+
+
+def test_release_writer_run_aggregates_model_failures():
+    """
+    Inputs:  release_writer.run over three models where the snapshot lookup
+             for one model raises.
+    Expected: the other two models are still recorded (inserts happen), and
+              run() raises RuntimeError naming exactly the failed model.
+
+    Background:
+        Models are processed concurrently; one bad model must not abort the
+        in-flight others, but the release build must still fail loudly and
+        say which model to investigate. Inserts are idempotent, so re-running
+        after a fix fills in only the remainder.
+    """
+    from unittest.mock import MagicMock
+
+    import g3dt.utils.release_writer as rw
+
+    inserted = []
+
+    def fake_insert(**kwargs):
+        inserted.append(kwargs["model_name"])
+
+    def fake_snapshot(self, return_commit_datetime=False):
+        if self.table_name == "silver_bad":
+            raise ValueError("boom")
+        return 42, "2026-01-01 00:00:00"
+
+    with patch.object(rw, "get_model_names", return_value=["silver_a", "silver_bad", "silver_b"]), \
+         patch.object(rw, "insert_release_row", side_effect=fake_insert), \
+         patch.object(rw.AthenaQuery, "create_release_table", MagicMock()), \
+         patch.object(rw.AthenaQuery, "find_db_for_model", lambda self, m, databases=None: "etl_test_raw_silver_db"), \
+         patch.object(rw.AthenaValidationWriter, "_get_latest_snapshot_id", fake_snapshot):
+        with pytest.raises(RuntimeError, match="silver_bad"):
+            rw.run(
+                dbt_schema_path="schema.yml",
+                release_db="etl_test_dataops_metadata_db",
+                release_table="releases",
+                release_s3_location="s3://etl-test-metadata/",
+                data_release_version="0.0.1",
+                commit_id="deadbeef",
+                aws_region="ap-southeast-2",
+                athena_s3_output="s3://etl-test-athena-results/",
+                max_workers=2,
+            )
+
+    assert sorted(inserted) == ["silver_a", "silver_b"]

@@ -7,6 +7,7 @@ import pandas as pd
 import logging
 import awswrangler as wr
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from botocore.exceptions import ClientError
 from g3dt.utils.athena_utils import write_iceberg_to_db
 
@@ -115,7 +116,7 @@ def write_bytes_to_s3(bytes_data, s3_uri: str):
         logger.error(f"Failed to write bytes to {s3_uri}: {e}")
         raise
 
-def download_s3_file(s3_uri: str, local_path: str):
+def download_s3_file(s3_uri: str, local_path: str, s3_client=None):
     """
     Download a file from S3 and save it to the local filesystem.
 
@@ -123,6 +124,8 @@ def download_s3_file(s3_uri: str, local_path: str):
     :type s3_uri: str
     :param local_path: Absolute or relative path where file will be saved locally.
     :type local_path: str
+    :param s3_client: Optional pre-built boto3 S3 client to reuse (avoids
+        constructing a fresh client per file). Defaults to a new client.
 
     :raises ClientError: If the file cannot be retrieved from S3.
     :raises Exception: For filesystem write errors and other issues.
@@ -132,7 +135,7 @@ def download_s3_file(s3_uri: str, local_path: str):
         >>> download_s3_file('s3://bucket/data.csv', '/tmp/my_local_copy.csv')
     """
     bucket, key = parse_s3_uri(s3_uri)
-    s3 = get_s3_client()
+    s3 = s3_client or get_s3_client()
     try:
         logger.info(f"Downloading {s3_uri} to {local_path}")
         s3.download_file(bucket, key, local_path)
@@ -362,7 +365,8 @@ def download_s3_files_to_temp_dir(s3_uris: list[str], temp_dir_name: str = "to_v
         target_temp_dir = os.path.join(base_tempdir, temp_dir_name)
         os.makedirs(target_temp_dir, exist_ok=True)
         logger.debug(f"Target temp dir for downloads: {target_temp_dir}")
-        downloaded_files = []
+
+        targets = []
         for s3_uri in s3_uris:
             if not s3_uri.startswith("s3://"):
                 logger.warning(f"Skipping invalid s3_uri (not an s3 path): {s3_uri}")
@@ -374,13 +378,25 @@ def download_s3_files_to_temp_dir(s3_uris: list[str], temp_dir_name: str = "to_v
                 final_file_name = "_".join(parts[2:])
             else:
                 final_file_name = file_name
-            dest_path = os.path.join(target_temp_dir, final_file_name)
-            try:
-                download_s3_file(s3_uri, dest_path)
-                downloaded_files.append(dest_path)
-            except Exception as e:
-                logger.warning(f"Skipping failed download for {s3_uri}: {e}")
-                continue
+            targets.append((s3_uri, os.path.join(target_temp_dir, final_file_name)))
+
+        # Downloads are independent — fetch them concurrently, one client per
+        # worker thread (clients from the default session are not thread-safe
+        # to construct concurrently, so each worker builds its own).
+        def _fetch(target):
+            s3_uri, dest_path = target
+            download_s3_file(s3_uri, dest_path, s3_client=boto3.Session().client("s3"))
+            return dest_path
+
+        downloaded_files = []
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(targets)))) as pool:
+            future_to_uri = {pool.submit(_fetch, t): t[0] for t in targets}
+            for future in as_completed(future_to_uri):
+                try:
+                    downloaded_files.append(future.result())
+                except Exception as e:
+                    logger.warning(f"Skipping failed download for {future_to_uri[future]}: {e}")
+
         logger.info(f"Total files downloaded: {len(downloaded_files)}")
         return target_temp_dir, downloaded_files
     except Exception as e:
@@ -463,6 +479,81 @@ def truncate_linkage_results(linkage_results_dict: dict) -> dict:
     return linkage_results_dict
 
 
+#: validation_error patterns treated as known noise by the validation gate —
+#: structural artefacts of the export (null-typed fields, extra export-side
+#: properties, the Gen3 'programs' root requirement), not data quality issues.
+VALIDATION_GATE_IGNORED_ERRORS = (
+    "%None is not%",
+    "%Additional properties are not%",
+    "%''programs'' is a required property%",
+)
+
+
+def run_validation_gate(glue_database: str, athena_s3_output: str,
+                        aws_region: str, workgroup: str = "primary",
+                        results_table: str = "full_validation_results",
+                        aws_profile=None) -> pd.DataFrame:
+    """Query the latest validation run for REAL failures; return the summary.
+
+    The gate looks at the most recent ``validation_id`` in the results table,
+    filters out the known-noise error patterns
+    (:data:`VALIDATION_GATE_IGNORED_ERRORS`) and synthetic studies, and
+    aggregates what remains. An empty result means the latest validation run
+    is clean; any rows are genuine schema failures an operator must fix.
+
+    Callers (the validator Glue job) FAIL the run when rows come back, so the
+    validation Step Function goes red until the data is fixed and validation
+    re-run — a green run means schema-clean data.
+
+    Returns:
+        DataFrame with columns node, study_id, invalid_key, validator_value,
+        validation_error, n — one row per distinct failure signature.
+    """
+    from g3dt.utils.athena_utils import AthenaConfig, AthenaQuery
+
+    ignore_clauses = "\n".join(
+        f"  AND validation_error NOT LIKE '{pattern}'"
+        for pattern in VALIDATION_GATE_IGNORED_ERRORS
+    )
+    sql = f"""
+SELECT node, study_id, invalid_key, validator_value, validation_error, count(*) AS n
+FROM "{glue_database}"."{results_table}"
+WHERE validation_id = (
+    SELECT MAX(validation_id)
+    FROM "{glue_database}"."{results_table}"
+)
+{ignore_clauses}
+  AND study_id NOT LIKE '%synthetic%'
+GROUP BY node, study_id, invalid_key, validator_value, validation_error
+ORDER BY node, study_id
+"""
+    config = AthenaConfig(
+        aws_region=aws_region,
+        aws_profile=aws_profile,
+        athena_s3_output=athena_s3_output,
+        workgroup=workgroup,
+    )
+    query = AthenaQuery(config)
+    return query.query_athena(sql=sql, athena_database=glue_database, ctas_approach=False)
+
+
+def load_and_resolve_schema(schema_s3_uri: str):
+    """Download the Gen3 schema from S3 and return (schema, resolved resolver).
+
+    The result is loop-invariant for a given schema URI — callers validating
+    several studies should call this ONCE and pass the pair into
+    :func:`validate_pipeline` via ``schema=``/``resolver=`` instead of paying
+    the S3 download + reference resolution per study.
+    """
+    schema = load_schema_from_s3_uri(schema_s3_uri)
+    schema_path = write_schema_to_temp_file(schema)
+    logger.info("Schema loaded and written to temp file: %s", schema_path)
+    resolver = gen3_validator.ResolveSchema(schema_path=schema_path)
+    resolver.resolve_schema()
+    logger.info("Schema resolved.")
+    return schema, resolver
+
+
 def validate_pipeline(
     study_id: str,
     schema_s3_uri: str,
@@ -472,7 +563,11 @@ def validate_pipeline(
     athena_s3_output: str,
     workgroup: str = "primary",
     root_node: str = "project",
-) -> None:
+    schema: dict = None,
+    resolver=None,
+    metadata_table: pd.DataFrame = None,
+    write_iceberg: bool = True,
+) -> pd.DataFrame:
     """
     Orchestrate the validation workflow for a study: load + resolve schema, find the latest
     validation artefacts, validate, and persist results to S3 and Athena/Glue.
@@ -486,6 +581,20 @@ def validate_pipeline(
         athena_s3_output: S3 URI for Athena query results and temporary staging.
         workgroup: Athena workgroup to use. Defaults to "primary".
         root_node: Root node in the schema graph for link validation.
+        schema: Optional pre-loaded schema dict (see :func:`load_and_resolve_schema`).
+            When None, the schema is downloaded from ``schema_s3_uri``.
+        resolver: Optional pre-resolved ``gen3_validator.ResolveSchema``. Must be
+            supplied together with ``schema``. When None, resolution runs here.
+        metadata_table: Optional pre-built metadata DataFrame (the listing of
+            ``validation_s3_uri``). When None, the prefix is listed here. Callers
+            looping over studies should list ONCE and pass it in — the listing
+            scans the whole prefix and grows with run history.
+        write_iceberg: When False, skip the per-study Iceberg write and leave it
+            to the caller (who can concatenate several studies' results into a
+            single write). The CSV write-back always happens.
+
+    Returns:
+        The study's validation results DataFrame.
 
     Raises:
         RuntimeError: When expected inputs are missing or a pipeline step fails.
@@ -493,29 +602,27 @@ def validate_pipeline(
     # NOTE: root_node is currently unused in the original implementation.
     # Keeping it in the signature for forward compatibility.
 
-    try:
-        schema = load_schema_from_s3_uri(schema_s3_uri)
-        schema_path = write_schema_to_temp_file(schema)
-        logger.info("Schema loaded and written to temp file: %s", schema_path)
-    except Exception as e:
-        logger.exception("Schema loading/writing failed.")
-        raise RuntimeError("Schema loading/writing failed.") from e  
+    if (schema is None) != (resolver is None):
+        raise ValueError("schema and resolver must be provided together (or both omitted).")
 
-    try:
-        logger.info("Instantiating schema resolver with schema path: %s", schema_path)
-        resolver = gen3_validator.ResolveSchema(schema_path=schema_path)
-        resolver.resolve_schema()
-        logger.info("Schema resolved.")
-    except Exception as e:
-        logger.exception("Failed to instantiate or resolve schema.")
-        raise RuntimeError("Schema resolution failed.") from e
+    if resolver is None:
+        try:
+            schema, resolver = load_and_resolve_schema(schema_s3_uri)
+        except Exception as e:
+            logger.exception("Schema loading/resolution failed.")
+            raise RuntimeError("Schema loading/writing failed.") from e
+    else:
+        logger.info("Using pre-resolved schema (loop-invariant hoisted by caller).")
 
-    try:
-        metadata_table = pd.DataFrame(create_metadata_table(validation_s3_uri))
-        logger.info("Metadata table created from S3 (%s rows).", len(metadata_table))
-    except Exception as e:
-        logger.exception("Failed to create metadata table.")
-        raise RuntimeError("Metadata table creation failed.") from e
+    if metadata_table is None:
+        try:
+            metadata_table = pd.DataFrame(create_metadata_table(validation_s3_uri))
+            logger.info("Metadata table created from S3 (%s rows).", len(metadata_table))
+        except Exception as e:
+            logger.exception("Failed to create metadata table.")
+            raise RuntimeError("Metadata table creation failed.") from e
+    else:
+        logger.info("Using pre-built metadata table (%s rows).", len(metadata_table))
 
     try:
         latest_metadata, latest_validation_id = get_latest_validation_for_study(metadata_table, study_id)
@@ -591,19 +698,24 @@ def validate_pipeline(
         logger.exception("Failed to write CSV validation results to S3.")
         raise RuntimeError("Writing CSV results failed.") from e
 
-    try:
-        logger.info(
-            "Writing Parquet to Glue DB '%s', table '%s'.",
-            glue_database,
-            "full_validation_results",
-        )
-        write_iceberg_to_db(
-            df=full_validation_results_df,
-            database=glue_database,
-            table="full_validation_results",
-            athena_s3_output=athena_s3_output,
-            workgroup=workgroup,
-        )
-    except Exception as e:
-        logger.exception("Failed to write validation results to Parquet/Glue.")
-        raise RuntimeError("Writing Parquet/Glue results failed.") from e
+    if write_iceberg:
+        try:
+            logger.info(
+                "Writing Parquet to Glue DB '%s', table '%s'.",
+                glue_database,
+                "full_validation_results",
+            )
+            write_iceberg_to_db(
+                df=full_validation_results_df,
+                database=glue_database,
+                table="full_validation_results",
+                athena_s3_output=athena_s3_output,
+                workgroup=workgroup,
+            )
+        except Exception as e:
+            logger.exception("Failed to write validation results to Parquet/Glue.")
+            raise RuntimeError("Writing Parquet/Glue results failed.") from e
+    else:
+        logger.info("Skipping per-study Iceberg write (deferred to caller).")
+
+    return full_validation_results_df

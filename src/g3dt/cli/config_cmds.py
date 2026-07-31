@@ -212,15 +212,24 @@ def dbt_env(
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
+    raw_silver_db = rc.get("glue/db/rawSilver")
+    raw_gold_db = rc.get("glue/db/rawGold")
     values = {
         "G3DT_REGION": rc.region,
         "G3DT_ATHENA_WORKGROUP": rc.athena_workgroup,
         "G3DT_ATHENA_OUTPUT": rc.athena_output_location,
         "G3DT_DB_RAW_BRONZE": rc.get("glue/db/rawBronze"),
-        "G3DT_DB_RAW_SILVER": rc.get("glue/db/rawSilver"),
-        "G3DT_DB_RAW_GOLD": rc.get("glue/db/rawGold"),
+        "G3DT_DB_RAW_SILVER": raw_silver_db,
+        "G3DT_DB_RAW_GOLD": raw_gold_db,
         "G3DT_S3_SILVER_DATA_DIR": f"s3://{rc.get('buckets/rawSilver')}/dbt/",
         "G3DT_S3_GOLD_DATA_DIR": f"s3://{rc.get('buckets/rawGold')}/dbt/",
+        # CI isolation: the dbt template's `ci` target builds into these
+        # instead — same grammar as the CDK's ci_ databases, same buckets
+        # under a dbt_ci/ prefix. Real names above are never prefixed.
+        "G3DT_DB_RAW_SILVER_CI": f"ci_{raw_silver_db}" if raw_silver_db else None,
+        "G3DT_DB_RAW_GOLD_CI": f"ci_{raw_gold_db}" if raw_gold_db else None,
+        "G3DT_S3_SILVER_DATA_DIR_CI": f"s3://{rc.get('buckets/rawSilver')}/dbt_ci/",
+        "G3DT_S3_GOLD_DATA_DIR_CI": f"s3://{rc.get('buckets/rawGold')}/dbt_ci/",
     }
     if profile:
         # A named profile means a laptop run: select the dbt target that

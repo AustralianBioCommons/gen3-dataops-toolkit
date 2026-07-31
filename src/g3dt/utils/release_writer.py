@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from g3dt.utils.athena_utils import AthenaConfig, AthenaQuery, AthenaValidationWriter
 from g3dt.utils.dbt_utils import get_model_names
 import logging
@@ -168,6 +169,7 @@ def run(
     workgroup: Optional[str] = None,
     search_databases: Optional[list] = None,
     dry_run: bool = False,
+    max_workers: int = 8,
 ) -> None:
     """Write one release row per dbt model (idempotent; see insert_release_row).
 
@@ -176,6 +178,14 @@ def run(
     (``g3dt release write``). With ``dry_run`` the resolved target and the
     INSERT SQL are logged but nothing is written (model/snapshot lookups are
     read-only and still run).
+
+    Models are processed concurrently (bounded by ``max_workers``): the work
+    is Athena-latency-bound (a snapshot lookup and an idempotent INSERT per
+    model), so a serial loop over ~100 models costs tens of minutes for no
+    reason. Each worker builds its own AthenaQuery/writer; a model whose
+    database cannot be resolved is skipped with a warning (unchanged
+    behaviour), and any other per-model failure is collected — the run raises
+    at the end naming every failed model.
     """
     logger.info("==== DBT release snapshot info writer started ====")
 
@@ -202,12 +212,14 @@ def run(
 
     logger.info(f"Processing DBT models from schema: {dbt_models}")
 
-    for model_name in dbt_models:
+    def process_model(model_name: str) -> None:
+        """Record one model's release row. Thread-safe unit of work."""
         logger.info(f"--- Processing model: {model_name}")
-        db_name = athena_query.find_db_for_model(model_name, databases=search_databases)
+        model_query = AthenaQuery(athena_config)
+        db_name = model_query.find_db_for_model(model_name, databases=search_databases)
         if not db_name:
             logger.warning(f"Database not found for model '{model_name}'. Skipping...")
-            continue
+            return
 
         snapshot_writer = AthenaValidationWriter(athena_config, db_name, model_name)
         snapshot_id, commit_datetime = snapshot_writer._get_latest_snapshot_id(return_commit_datetime=True)
@@ -227,6 +239,23 @@ def run(
         )
         logger.info(f"[SUCCESS] Release info recorded for {db_name}.{model_name}")
 
+    failures = {}
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        future_to_model = {pool.submit(process_model, m): m for m in dbt_models}
+        for future in as_completed(future_to_model):
+            model_name = future_to_model[future]
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"FAILED to record release info for model '{model_name}': {e}")
+                failures[model_name] = e
+
+    if failures:
+        raise RuntimeError(
+            f"Release write failed for {len(failures)} model(s): {sorted(failures)}. "
+            "Successful models were recorded (inserts are idempotent) — fix the "
+            "cause and re-run to fill in the remainder."
+        )
     logger.info(f"Finished release process for DBT models: {dbt_models}")
 
 
