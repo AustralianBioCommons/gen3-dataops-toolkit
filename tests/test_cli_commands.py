@@ -321,6 +321,134 @@ def test_delete_metadata_all_versions_passes_all(mock_run, _study, _env):
 @patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
 @patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
 @patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_per_study_versions_build_qualified_spec(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        Release ladders diverge per study in practice (one study retiring
+        0.7.5 while another retires 0.8.1), so one job must be able to carry
+        a different version per study instead of one job per study.
+
+    Inputs:  --studies "ausdiab:0.7.5,caughtcad:0.8.1" (no --version)
+    Expected Output: the wrapper receives the qualified key:version list and
+    NO --version flag.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab:0.7.5,caughtcad:0.8.1",
+         "--env", "staging", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    i = argv.index("--studies")
+    assert argv[i + 1] == "ausdiab_staging:0.7.5,caughtcad_staging:0.8.1"
+    assert "--version" not in argv
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_uniform_versions_collapse_to_legacy_argv(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        When every study lands on the same version — every invocation that
+        existed before per-study specs — the wrapper must receive the
+        historical `--studies a,b --version X` shape, byte-identical, so a
+        newer CLI stays compatible with an older installed service script.
+
+    Inputs:  --studies "ausdiab:0.9.8,caughtcad" --version 0.9.8
+    Expected Output: plain key list + one --version 0.9.8, no colons.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab:0.9.8,caughtcad",
+         "--env", "staging", "--version", "0.9.8", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    i = argv.index("--studies")
+    assert argv[i + 1] == "ausdiab_staging,caughtcad_staging"
+    assert argv[argv.index("--version") + 1] == "0.9.8"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_bare_study_without_version_is_usage_error(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        The whole list is validated before anything is dispatched — a typo in
+        the last study must not leave the earlier ones already deleted.
+
+    Inputs:  --studies "ausdiab:0.7.5,caughtcad" with NO --version
+    Expected Output: exit 2 naming the bare study, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab:0.7.5,caughtcad",
+         "--env", "staging", "--yes"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "caughtcad" in result.output
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_rejects_colon_with_no_version(mock_run, _study, _env):
+    """
+    Background:
+        A trailing colon is a half-finished edit, not a request for the
+        default. Silently falling back to --version would delete a version
+        the operator did not name — partition(':') makes the two cases
+        distinguishable.
+
+    Inputs:  --studies "ausdiab:" --version 0.9.8
+    Expected Output: exit 2, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab:",
+         "--env", "staging", "--version", "0.9.8", "--yes"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_mixed_all_and_specific_always_prompts(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        Deleting ALL versions is the most destructive path and always
+        prompts, even with --yes. One 'all' hidden mid-list must force the
+        same prompt — otherwise it rides along on a batch marked unattended.
+
+    Inputs:  --studies "ausdiab:0.9.8,caughtcad:all" --yes, prompt declined
+    Expected Output: non-zero exit, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab:0.9.8,caughtcad:all",
+         "--env", "staging", "--yes"],
+        input="n\n",
+    )
+    assert result.exit_code != 0
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
 def test_delete_metadata_strips_leading_v_from_version(mock_run, _study, _env):
     """
     Background:
