@@ -12,6 +12,8 @@ TTY), after which the remote job runs non-interactively.
 """
 from __future__ import annotations
 
+import re
+
 import typer
 
 from g3dt.cli._internal import dispatch, safety
@@ -21,6 +23,37 @@ from g3dt.cli._internal.resolve import study_of
 app = typer.Typer(no_args_is_help=True, help="Delete metadata from Gen3 (destructive).")
 
 _DELETE_METADATA = "services/delete/delete_metadata.sh"
+
+#: A version token in the form the Athena ``version`` column stores it. The
+#: uploader writes ``group(1)`` of this same pattern (metadata_submitter's
+#: ``_find_version_from_path``), i.e. WITHOUT any leading ``v``. The delete
+#: query interpolates the string straight into SQL, so a ``v``-prefixed version
+#: matches zero rows and is reported as "skipped" rather than as an error — a
+#: silent no-op that reads as a clean run. Normalising here closes that.
+_VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+)$", re.IGNORECASE)
+
+
+def _normalise_version(raw: str, where: str) -> str:
+    """Canonicalise one version token to the form stored in Athena.
+
+    ``all`` in any case becomes ``all``; ``v1.5.4`` and ``1.5.4`` both become
+    ``1.5.4``. Anything else is a usage error: the column only ever holds
+    three-part semver, so a truncated version like ``0.9`` would match nothing
+    and be counted as a skip.
+    """
+    token = raw.strip()
+    if token.lower() == "all":
+        return "all"
+    match = _VERSION_RE.match(token)
+    if not match:
+        typer.secho(
+            f"Invalid version '{raw}' {where}: expected x.y.z (e.g. 0.9.8) "
+            "or 'all'.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    return match.group(1)
 
 
 @app.command()
@@ -54,10 +87,12 @@ def metadata(
         )
         raise typer.Exit(2)
 
+    version = _normalise_version(version, "for --version")
+
     names = [s.strip() for s in studies.split(",") if s.strip()]
     keys = [study_of(name, env).key for name in names]
     target = ",".join(keys)
-    all_versions = version.strip().lower() == "all"
+    all_versions = version == "all"
 
     if all_versions:
         # Deleting every version is the most destructive path: always prompt

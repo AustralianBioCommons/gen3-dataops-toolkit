@@ -224,6 +224,56 @@ def test_delete_metadata_all_versions_passes_all(mock_run, _study, _env):
     assert argv[j + 1] == "all"
 
 
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_strips_leading_v_from_version(mock_run, _study, _env):
+    """
+    Background:
+        Athena stores the release version without a leading 'v' — the uploader
+        parses it out of the S3 path and keeps only group(1) of ^v?(x.y.z)$.
+        The delete query interpolates the operator's string literally, so a
+        'v'-prefixed version matches zero rows; the bulk wrapper then reports
+        exit 3 as "skipped" and the run looks clean while deleting nothing.
+        Normalising in the CLI closes that silent no-op.
+
+    Inputs:  --version V0.9.8 (case and prefix both wrong)
+    Expected Output: the wrapper receives exactly 0.9.8.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab",
+         "--env", "staging", "--version", "V0.9.8", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[argv.index("--version") + 1] == "0.9.8"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_rejects_malformed_version(mock_run, _study, _env):
+    """
+    Background:
+        The upload path only ever writes three-part semver into the version
+        column, so a truncated version like 0.9 can never match a row. Left
+        unchecked it deletes nothing and is counted as a skip — invisible to
+        the operator. Rejecting it loudly refuses no valid input.
+
+    Inputs:  --version 0.9
+    Expected Output: exit 2, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab",
+         "--env", "staging", "--version", "0.9", "--yes"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "Invalid version" in result.output
+
+
 @patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
 @patch("g3dt.cli._internal.runner.run")
 def test_k8s_restart_schema_passes_env_argo_args(mock_run, _env):
