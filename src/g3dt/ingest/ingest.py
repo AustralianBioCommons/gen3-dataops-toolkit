@@ -1,12 +1,15 @@
 import awswrangler as wr
 import pandas as pd
 import boto3
-from g3dt.utils.athena_utils import write_iceberg_to_db
+from g3dt.utils.athena_utils import write_iceberg_to_db, write_parquet_to_db
 import urllib.parse
 import os
 import uuid
+import warnings
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from botocore.config import Config
 from botocore.exceptions import ClientError
 import logging
 import pytz  # Replaced tzlocal with pytz
@@ -17,7 +20,9 @@ from typing import Dict
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-s3 = boto3.client("s3")
+# Pool sized above get_ingest_true_files' max_workers so threaded
+# GetObjectTagging calls aren't throttled by urllib3's default pool of 10.
+s3 = boto3.client("s3", config=Config(max_pool_connections=64))
 
 # ---------- helpers ----------
 def parse_s3(uri: str):
@@ -352,9 +357,13 @@ def align_and_combine_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
         logger.error(f"Failed to align and combine DataFrames: {e}")
         raise RuntimeError(f"Failed to align and combine DataFrames: {e}")
 
-def get_ingest_true_files(s3_uri: str, exclude_directories: list[str] = None) -> list[str]:
+def get_ingest_true_files(s3_uri: str, exclude_directories: list[str] = None, max_workers: int = 32) -> list[str]:
     """
     Get a list of files from an S3 URI, excluding directories.
+
+    Tag lookups (GetObjectTagging) are made concurrently with a thread
+    pool, since checking one object per round-trip is the dominant cost
+    when scanning buckets with many files.
 
     Parameters
     ----------
@@ -362,11 +371,14 @@ def get_ingest_true_files(s3_uri: str, exclude_directories: list[str] = None) ->
         S3 URI to list files from.
     exclude_directories : list[str], optional
         List of directories to exclude. Defaults to None.
+    max_workers : int, optional
+        Number of concurrent tag lookups. Defaults to 32, which S3
+        handles comfortably for GetObjectTagging.
 
     Returns
     -------
     list[str]
-        List of file paths.
+        List of file paths, in listing order.
     """
     logger.debug(f"Getting files from {s3_uri}")
     try:
@@ -380,22 +392,25 @@ def get_ingest_true_files(s3_uri: str, exclude_directories: list[str] = None) ->
         logger.debug(f"Found {len(file_paths)} files after excluding directories: {exclude_directories}")
     else:
         logger.debug(f"No directories excluded from {s3_uri}")
-    
-    ingest_files = []
-    for path in file_paths:
+
+    def check(path):
         try:
             tags = get_tags(path)
         except Exception as e:
             logger.warning(f"Could not get tags for {path}: {e}")
-            continue
-        if not tags or "ingest" not in tags or tags["ingest"] != "true":
+            return None
+        if not tags or tags.get("ingest") != "true":
             logger.debug(f"Skipping {path}: missing or non-true 'ingest' tag")
-            continue
-        ingest_files.append(path)
+            return None
+        return path
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = executor.map(check, file_paths)
+    ingest_files = [path for path in results if path]
     logger.debug(f"Found {len(ingest_files)} files with 'ingest' tag set to 'true'")
     return ingest_files
 
-def ingest_table_to_parquet_dataset(
+def ingest_table_to_dataset(
     s3_uri: str,
     database: str,
     table_prefix: str,
@@ -405,16 +420,19 @@ def ingest_table_to_parquet_dataset(
     ingest_submission_id: str = None,
     ingest_received_at: str = None,
     ingest_run_id: str = None,
+    table_format: str = "iceberg",
+    dataset_root: str = None,
+    mode: str = "append",
 ) -> dict:
     """
-    Ingest a single CSV or JSON file from S3, annotate with metadata, and write to an Iceberg table.
+    Ingest a single CSV or JSON file from S3, annotate with metadata, and write to an Iceberg or Parquet dataset.
     The file is written to a Glue table named "{table_prefix}_{node}", where node is taken from the S3 tags.
 
     Steps:
       - Reads the file and its S3 tags/head metadata.
       - Annotates with ingest metadata and S3 tags.
       - Computes a row hash for deduplication/auditing.
-      - Writes to an Iceberg table in Glue/Athena under table "{table_prefix}_{node}".
+      - Writes to an Iceberg or Parquet table in Glue/Athena under table "{table_prefix}_{node}".
 
     Parameters
     ----------
@@ -436,12 +454,29 @@ def ingest_table_to_parquet_dataset(
         Timestamp for when the ingest was received. If None, will use current UTC time.
     ingest_run_id : str, optional
         Unique ID for this ingest run. If None, will generate a new one.
+    table_format : str, optional
+        Table format to write: "iceberg" or "parquet". Defaults to "iceberg".
+    dataset_root : str, optional
+        S3 URI for the root of the Parquet dataset (e.g., 's3://bucket/prefix/').
+        Required when table_format is "parquet"; ignored for "iceberg".
+    mode : str, optional
+        Write mode for the Parquet dataset: "append", "overwrite", or
+        "overwrite_partitions". Defaults to "append". Ignored for "iceberg".
 
     Returns
     -------
     dict
         Summary of the ingest run, including run ID, file count, and tables/partitions written.
     """
+    if table_format not in ("iceberg", "parquet"):
+        logger.error(f"Invalid table_format: {table_format!r}")
+        raise ValueError(
+            f"table_format must be 'iceberg' or 'parquet', got {table_format!r}"
+        )
+    if table_format == "parquet" and not dataset_root:
+        logger.error("dataset_root is required when table_format='parquet'")
+        raise ValueError("dataset_root is required when table_format='parquet'")
+
     if ingest_received_at is None:
         aest_tz = pytz.timezone("Australia/Melbourne")
         ingest_received_at = datetime.now(aest_tz).strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -518,19 +553,31 @@ def ingest_table_to_parquet_dataset(
         logger.error(f"Failed to prepare ingest metadata for file {uri}: {e}")
         raise RuntimeError(f"Failed to prepare ingest metadata for file {uri}: {e}")
 
-    # Write this file's DataFrame to its Iceberg table
+    # Write this file's DataFrame to its Iceberg or Parquet table
     try:
-        write_iceberg_to_db(
-            df=annotated_df,
-            database=database,
-            table=table_name,
-            athena_s3_output=athena_s3_output,
-            workgroup=workgroup,
-        )
-        logger.debug(f"Successfully wrote {len(annotated_df)} rows to Iceberg table {database}.{table_name}")
+        if table_format == "iceberg":
+            write_iceberg_to_db(
+                df=annotated_df,
+                database=database,
+                table=table_name,
+                athena_s3_output=athena_s3_output,
+                workgroup=workgroup,
+            )
+        else:
+            write_parquet_to_db(
+                df=annotated_df,
+                dataset_root=dataset_root,
+                database=database,
+                table=table_name,
+                partition_cols=["study_id", "submission_date", "ingest_file_name"],
+                compression="snappy",
+                mode=mode,
+                schema_evolution=True,
+            )
+        logger.debug(f"Successfully wrote {len(annotated_df)} rows to {table_format} table {database}.{table_name}")
     except Exception as e:
-        logger.error(f"Failed to write DataFrame to Iceberg table {table_name}: {e}")
-        raise RuntimeError(f"Failed to write DataFrame to Iceberg table {table_name}: {e}")
+        logger.error(f"Failed to write DataFrame to {table_format} table {table_name}: {e}")
+        raise RuntimeError(f"Failed to write DataFrame to {table_format} table {table_name}: {e}")
 
     # Track partitions written for this table
     try:
@@ -567,17 +614,20 @@ def ingest_table_to_parquet_dataset(
         "results": results
     }
 
-def ingest_files_to_parquet_dataset(
+def ingest_files_to_dataset(
     s3_uris: list,
     database: str,
     table_prefix: str,
     athena_s3_output: str,
     workgroup: str = "primary",
     ingest_submission_id: str = None,
-    exclude_fn: list = ['program.json', 'project.json'],
+    exclude_fn: list = None,
+    table_format: str = "iceberg",
+    dataset_root: str = None,
+    mode: str = "append",
 ):
     """
-    Ingest multiple files from S3, annotate with metadata, and write to Iceberg tables in Glue/Athena.
+    Ingest multiple files from S3, annotate with metadata, and write to Iceberg or Parquet tables in Glue/Athena.
     Each time this function is called, a single ingestion ID is created which will be attached to all the files
     in the list of s3_uris.
 
@@ -597,15 +647,26 @@ def ingest_files_to_parquet_dataset(
         Submission ID for ingest metadata. Defaults to None.
     exclude_fn : list, optional
         List of file names from the s3_uris to exclude from ingestion.
+        Defaults to ['program.json', 'project.json'].
         Example: ['program.json', 'project.json'] or ['randomDatafile.csv']
+    table_format : str, optional
+        Table format to write: "iceberg" or "parquet". Defaults to "iceberg".
+    dataset_root : str, optional
+        S3 URI for the root of the Parquet dataset (e.g., 's3://bucket/prefix/').
+        Required when table_format is "parquet"; ignored for "iceberg".
+    mode : str, optional
+        Write mode for the Parquet dataset: "append", "overwrite", or
+        "overwrite_partitions". Defaults to "append". Ignored for "iceberg".
     """
-    
+    if exclude_fn is None:
+        exclude_fn = ['program.json', 'project.json']
+
     ingest_run_id = str(uuid.uuid4())
-    
+
     # Generate timestamp in Australia/Melbourne timezone
     aest_tz = pytz.timezone("Australia/Melbourne")
     ingest_received_at = datetime.now(aest_tz).strftime("%Y-%m-%dT%H:%M:%S%z")
-    
+
     # Hardcode the timezone for metadata
     ingest_timezone = "Australia/Melbourne"
 
@@ -613,7 +674,7 @@ def ingest_files_to_parquet_dataset(
     for uri in s3_uris:
         if any(uri.endswith(exclude) for exclude in exclude_fn):
             continue
-        resp = ingest_table_to_parquet_dataset(
+        resp = ingest_table_to_dataset(
             s3_uri=uri,
             database=database,
             table_prefix=table_prefix,
@@ -622,8 +683,31 @@ def ingest_files_to_parquet_dataset(
             ingest_timezone=ingest_timezone,
             ingest_submission_id=ingest_submission_id,
             ingest_run_id=ingest_run_id,
-            ingest_received_at=ingest_received_at
+            ingest_received_at=ingest_received_at,
+            table_format=table_format,
+            dataset_root=dataset_root,
+            mode=mode,
         )
         results.append(resp)
 
     return results
+
+
+def ingest_table_to_parquet_dataset(*args, **kwargs) -> dict:
+    """Deprecated: use ingest_table_to_dataset instead."""
+    warnings.warn(
+        "ingest_table_to_parquet_dataset is deprecated; "
+        "use ingest_table_to_dataset",
+        DeprecationWarning, stacklevel=2,
+    )
+    return ingest_table_to_dataset(*args, **kwargs)
+
+
+def ingest_files_to_parquet_dataset(*args, **kwargs):
+    """Deprecated: use ingest_files_to_dataset instead."""
+    warnings.warn(
+        "ingest_files_to_parquet_dataset is deprecated; "
+        "use ingest_files_to_dataset",
+        DeprecationWarning, stacklevel=2,
+    )
+    return ingest_files_to_dataset(*args, **kwargs)

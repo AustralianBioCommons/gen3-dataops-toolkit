@@ -336,6 +336,85 @@ def write_iceberg_to_db(
         )
 
 
+def write_parquet_to_db(
+    df: pd.DataFrame,
+    dataset_root: str,
+    database: str,
+    table: str,
+    partition_cols: list = None,
+    compression: str = "snappy",
+    mode: str = "append",
+    schema_evolution: bool = True,
+    boto3_session=None,
+) -> None:
+    """
+    Write a DataFrame to S3 as a Parquet dataset and register/update
+    the Glue table.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The DataFrame to write.
+    dataset_root : str
+        S3 URI for the root of the Parquet dataset
+        (e.g., 's3://bucket/prefix/').
+    database : str
+        Glue database name.
+    table : str
+        Glue table name.
+    partition_cols : list, optional
+        List of columns to partition by. Defaults to
+        ["study_id", "submission_date"].
+    compression : str, optional
+        Parquet compression codec. Defaults to "snappy".
+    mode : str, optional
+        Write mode for Parquet dataset. Defaults to "append".
+        You can also use "overwrite" to overwrite existing data,
+        or "overwrite_partitions" to overwrite partitions only.
+    schema_evolution : bool, optional
+        Whether to allow schema evolution. Defaults to True.
+    boto3_session : boto3.Session, optional
+        A boto3 session. If None, the default session is used.
+    """
+    if partition_cols is None:
+        partition_cols = ["study_id", "submission_date"]
+
+    try:
+        logger.debug(f"Creating Glue database '{database}' if not exists.")
+        wr.catalog.create_database(name=database, exist_ok=True)
+        logger.debug(
+            f"Writing DataFrame to Parquet at {dataset_root.rstrip('/')}/ "
+            f"(table: {table}, database: {database}, "
+            f"partitions: {partition_cols}, compression: {compression}, "
+            f"mode: {mode}, schema_evolution: {schema_evolution})"
+        )
+        wr.s3.to_parquet(
+            df=df.astype("string"),
+            path=dataset_root.rstrip("/") + "/",
+            dataset=True,
+            database=database,
+            table=table,
+            partition_cols=partition_cols,
+            compression=compression,
+            mode=mode,
+            schema_evolution=schema_evolution,
+            boto3_session=boto3_session,
+        )
+        logger.debug(
+            f"Successfully wrote Parquet dataset to S3 at {dataset_root} "
+            f"(table: {table}, database: {database})"
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to write Parquet dataset to S3 at {dataset_root} "
+            f"(table: {table}, database: {database}): {e}"
+        )
+        raise RuntimeError(
+            f"Failed to write Parquet dataset to S3 at {dataset_root} "
+            f"(table: {table}, database: {database}): {e}"
+        )
+
+
 def convert_dataframe_types_for_json(df: pd.DataFrame) -> pd.DataFrame:
     """
     Converts DataFrame column types to JSON-serialisable formats.
