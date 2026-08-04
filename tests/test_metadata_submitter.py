@@ -387,3 +387,64 @@ def test_submit_metadata_specific_node_not_found(submitter_instance):
 
         with pytest.raises(ValueError, match="Node 'nonexistent_node' not found in data import order"):
             submitter_instance.submit_metadata(specific_node='nonexistent_node')
+
+
+def _fake_jwt(iss: str) -> str:
+    """Build an unsigned JWT with the given iss claim (signature unverified)."""
+    import base64
+    import json as _json
+
+    def _b64(obj):
+        return base64.urlsafe_b64encode(
+            _json.dumps(obj).encode()
+        ).decode().rstrip("=")
+
+    header = _b64({"alg": "RS256", "typ": "JWT"})
+    sig = base64.urlsafe_b64encode(b"sig").decode().rstrip("=")
+    return f"{header}.{_b64({'iss': iss})}.{sig}"
+
+
+def test_commons_url_from_jwt_strips_user_suffix():
+    """
+    Test that the commons base URL is extracted from a Gen3 API key's JWT.
+
+    Background:
+        A Gen3 API key's JWT carries an `iss` claim of the form
+        "https://<commons>/user". Every tool infers the target environment
+        from that claim — the key IS the environment selector — so a staging
+        key targets staging and a prod key targets prod without anyone
+        passing a URL. Passing a mismatched URL to the Gen3 SDK makes it
+        silently fall back to the Workspace Token Service (not deployed on
+        these commons), which fails with a confusing 502 on
+        /wts/external_oidc/.
+
+    Inputs:  JWTs whose iss ends in /user (with and without trailing slash)
+    Expected Output: the bare commons URL — no /user, no trailing slash.
+    """
+    from g3dt.upload.metadata_submitter import commons_url_from_jwt
+
+    assert commons_url_from_jwt(
+        _fake_jwt("https://staging.commons.example.org/user")
+    ) == "https://staging.commons.example.org"
+    assert commons_url_from_jwt(
+        _fake_jwt("https://commons.example.org/")
+    ) == "https://commons.example.org"
+
+
+def test_infer_api_endpoint_from_jwt_appends_api_version():
+    """
+    Test that the sheepdog API endpoint keeps its /api/<version> suffix.
+
+    Background:
+        infer_api_endpoint_from_jwt delegates the JWT decoding to
+        commons_url_from_jwt. This pins the delegation contract so a future
+        refactor cannot change what the metadata uploader submits to.
+
+    Inputs:  a JWT issued by a staging commons
+    Expected Output: "<commons>/api/v0"
+    """
+    from g3dt.upload.metadata_submitter import infer_api_endpoint_from_jwt
+
+    assert infer_api_endpoint_from_jwt(
+        _fake_jwt("https://staging.commons.example.org/user")
+    ) == "https://staging.commons.example.org/api/v0"
