@@ -176,6 +176,100 @@ def test_metadata_upload_all_resolves_each_study(mock_run, _study, _env):
 
 
 @patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_refused_without_allow_prod(mock_run, _study, _env):
+    """
+    Background:
+        Bulk upload against production used to be impossible (the wrapped
+        script hard-aborted on any 'prod') while showing no local guard at
+        all. The gate makes prod possible but deliberate: without
+        --allow-prod the CLI refuses before anything is dispatched.
+
+    Inputs:  --env prod, no --allow-prod
+    Expected Output: exit 2, the wrapped script is never invoked.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab", "--env", "prod"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "--allow-prod" in result.output
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_with_flag_requires_typed_confirmation(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        --allow-prod alone is not enough: the operator must type the env
+        name exactly (confirm_prod_strict), locally, BEFORE any dispatch —
+        SSM has no TTY so a remote prompt could never be answered.
+
+    Inputs:  --env prod --allow-prod, then 'prod' typed at the prompt
+    Expected Output: exit 0 and the wrapped script receives --allow-prod.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab", "--env", "prod",
+         "--allow-prod"],
+        input="prod\n",
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert "--allow-prod" in argv
+    i = argv.index("--studies")
+    assert argv[i + 1] == "ausdiab_prod"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_mismatched_confirmation_aborts(
+    mock_run, _study, _env
+):
+    """
+    Inputs:  --env prod --allow-prod, but 'staging' typed at the prompt
+    Expected Output: non-zero exit, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab", "--env", "prod",
+         "--allow-prod"],
+        input="staging\n",
+    )
+    assert result.exit_code != 0
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_study_key_trips_the_gate(mock_run, _study, _env):
+    """
+    Background:
+        The env alone does not determine where the write lands: a study key
+        can resolve to another environment's commons. `--env staging
+        --studies ausdiab_prod` is a production write and must be gated
+        exactly like --env prod.
+
+    Inputs:  --env staging with a study whose resolved key contains 'prod'
+    Expected Output: exit 2 without --allow-prod.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab_prod",
+         "--env", "staging"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
 @patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
 @patch("g3dt.cli._internal.runner.run")
 def test_delete_metadata_specific_version_builds_argv(mock_run, _study, _env):
