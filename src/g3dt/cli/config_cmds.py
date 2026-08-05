@@ -25,6 +25,27 @@ app = typer.Typer(
 )
 
 
+def _req_key(rc, key: str) -> str:
+    """Return the SSM leaf ``key`` from ``rc``, failing loudly if absent.
+
+    The medallion names (``buckets/silver|gold``, ``glue/db/bronze|silver|gold``)
+    are published under these raw-free keys by pipeline deployments >= v2.0.0.
+    Before this guard, a missing key propagated as ``None``: dbt-env silently
+    dropped the G3DT_DB_* vars and emitted ``s3://None/dbt/`` data dirs, and
+    the release search silently fell back to an account-wide catalog walk.
+    """
+    value = rc.get(key)
+    if value is None:
+        raise config.ConfigError(
+            f"SSM parameter /{rc.project}/{rc.env}/{key} is missing. "
+            f"gen3-dataops-toolkit >= 3 reads the raw-free medallion keys "
+            f"published by gen3-aws-data-pipeline >= v2.0.0; a pipeline "
+            f"deployment older than v2.0.0 still publishes raw-prefixed keys. "
+            f"Upgrade the pipeline deployment (or pin gen3-dataops-toolkit<3)."
+        )
+    return value
+
+
 @app.command()
 def envs() -> None:
     """List the environments with a deployed SSM tree for this project."""
@@ -208,28 +229,31 @@ def dbt_env(
     profile = None if env.endswith("_ec2") else config.aws_profile_for(base, marker)
     try:
         rc = resolver.resolve(project, base, profile=profile)
+        silver_db = _req_key(rc, "glue/db/silver")
+        gold_db = _req_key(rc, "glue/db/gold")
+        silver_bucket = _req_key(rc, "buckets/silver")
+        gold_bucket = _req_key(rc, "buckets/gold")
+        bronze_db = _req_key(rc, "glue/db/bronze")
     except config.ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    raw_silver_db = rc.get("glue/db/rawSilver")
-    raw_gold_db = rc.get("glue/db/rawGold")
     values = {
         "G3DT_REGION": rc.region,
         "G3DT_ATHENA_WORKGROUP": rc.athena_workgroup,
         "G3DT_ATHENA_OUTPUT": rc.athena_output_location,
-        "G3DT_DB_RAW_BRONZE": rc.get("glue/db/rawBronze"),
-        "G3DT_DB_RAW_SILVER": raw_silver_db,
-        "G3DT_DB_RAW_GOLD": raw_gold_db,
-        "G3DT_S3_SILVER_DATA_DIR": f"s3://{rc.get('buckets/rawSilver')}/dbt/",
-        "G3DT_S3_GOLD_DATA_DIR": f"s3://{rc.get('buckets/rawGold')}/dbt/",
+        "G3DT_DB_BRONZE": bronze_db,
+        "G3DT_DB_SILVER": silver_db,
+        "G3DT_DB_GOLD": gold_db,
+        "G3DT_S3_SILVER_DATA_DIR": f"s3://{silver_bucket}/dbt/",
+        "G3DT_S3_GOLD_DATA_DIR": f"s3://{gold_bucket}/dbt/",
         # CI isolation: the dbt template's `ci` target builds into these
         # instead — same grammar as the CDK's ci_ databases, same buckets
         # under a dbt_ci/ prefix. Real names above are never prefixed.
-        "G3DT_DB_RAW_SILVER_CI": f"ci_{raw_silver_db}" if raw_silver_db else None,
-        "G3DT_DB_RAW_GOLD_CI": f"ci_{raw_gold_db}" if raw_gold_db else None,
-        "G3DT_S3_SILVER_DATA_DIR_CI": f"s3://{rc.get('buckets/rawSilver')}/dbt_ci/",
-        "G3DT_S3_GOLD_DATA_DIR_CI": f"s3://{rc.get('buckets/rawGold')}/dbt_ci/",
+        "G3DT_DB_SILVER_CI": f"ci_{silver_db}",
+        "G3DT_DB_GOLD_CI": f"ci_{gold_db}",
+        "G3DT_S3_SILVER_DATA_DIR_CI": f"s3://{silver_bucket}/dbt_ci/",
+        "G3DT_S3_GOLD_DATA_DIR_CI": f"s3://{gold_bucket}/dbt_ci/",
     }
     if profile:
         # A named profile means a laptop run: select the dbt target that

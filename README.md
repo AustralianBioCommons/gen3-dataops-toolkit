@@ -79,9 +79,11 @@ structurally impossible.
 
 **Only the dbt template's `ci` target is prefixed.** `g3dt config dbt-env`
 emits, alongside the real names, the CI-isolation variants the template's
-`ci` target consumes: `G3DT_DB_RAW_SILVER_CI` / `G3DT_DB_RAW_GOLD_CI`
+`ci` target consumes: `G3DT_DB_SILVER_CI` / `G3DT_DB_GOLD_CI`
 (`ci_` + the real database name) and `G3DT_S3_SILVER_DATA_DIR_CI` /
-`G3DT_S3_GOLD_DATA_DIR_CI` (`dbt_ci/` under the same buckets). Commit-
+`G3DT_S3_GOLD_DATA_DIR_CI` (`dbt_ci/` under the same buckets). Toolkit
+releases >= 3 read the raw-free medallion SSM keys and therefore require a
+pipeline deployment >= v2.0.0, which publishes them. Commit-
 triggered CI builds land there; every other target (default, local) and the
 release build keep the real, unprefixed names — so CI can never advance the
 warehouse's Iceberg snapshots that releases pin. The library enforces the

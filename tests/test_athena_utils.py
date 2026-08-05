@@ -1675,7 +1675,7 @@ def test_find_db_for_model_skips_ci_databases(mock_boto_session, mock_wr, scoped
         paths: the scoped databases= list and the account-wide catalog walk.
 
     Steps:
-        1. Present ['ci_proj_test_raw_gold_db', 'proj_test_raw_gold_db'],
+        1. Present ['ci_proj_test_gold_db', 'proj_test_gold_db'],
            both containing 'gold_model', with the ci_ database FIRST.
         2. Call find_db_for_model, scoped and unscoped.
 
@@ -1685,7 +1685,7 @@ def test_find_db_for_model_skips_ci_databases(mock_boto_session, mock_wr, scoped
     """
     mock_session_instance = MagicMock()
     mock_boto_session.return_value = mock_session_instance
-    dbs = ['ci_proj_test_raw_gold_db', 'proj_test_raw_gold_db']
+    dbs = ['ci_proj_test_gold_db', 'proj_test_gold_db']
     mock_wr.catalog.databases.return_value = {'Database': dbs}
     mock_wr.catalog.get_tables.return_value = [{'Name': 'gold_model'}]
 
@@ -1693,10 +1693,10 @@ def test_find_db_for_model_skips_ci_databases(mock_boto_session, mock_wr, scoped
         'gold_model', databases=dbs if scoped else None
     )
 
-    assert result == 'proj_test_raw_gold_db'
+    assert result == 'proj_test_gold_db'
     assert mock_wr.catalog.get_tables.call_count == 1
     mock_wr.catalog.get_tables.assert_called_once_with(
-        database='proj_test_raw_gold_db', boto3_session=mock_session_instance
+        database='proj_test_gold_db', boto3_session=mock_session_instance
     )
 
 

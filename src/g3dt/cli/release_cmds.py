@@ -57,10 +57,14 @@ def write(
         )
         # The env's own silver/gold DBs (from SSM) scope the model->DB search:
         # deterministic in shared accounts, no account-wide Glue perms needed.
+        # _req_key fails loudly if the raw-free keys are absent (pre-v2.0.0
+        # pipeline) instead of silently widening to an account-wide walk.
+        from g3dt.cli.config_cmds import _req_key
+
         search_databases = [
-            db for db in (rc.get("glue/db/rawSilver"), rc.get("glue/db/rawGold"))
-            if db
-        ] or None
+            _req_key(rc, "glue/db/silver"),
+            _req_key(rc, "glue/db/gold"),
+        ]
         release_writer.run(
             dbt_schema_path=dbt_schema_path,
             release_db=rc.release_db,
