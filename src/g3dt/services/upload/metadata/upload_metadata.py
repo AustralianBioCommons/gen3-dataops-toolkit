@@ -8,6 +8,8 @@ from g3dt.upload.metadata_submitter import (
     find_data_import_order_file_s3,
     create_boto3_session,
     get_gen3_api_key_aws_secret,
+    fetch_prior_uploads,
+    infer_api_endpoint_from_jwt,
     MetadataSubmitter,
 )
 
@@ -39,6 +41,12 @@ def main():
         help="Environment to upload to (e.g., test, staging, prod, staging_ec2, prod_ec2)"
     )
     parser.add_argument("--specific-node", help="Submit only a specific node")
+    parser.add_argument(
+        "--force-reupload", action="store_true",
+        help="Proceed even if the audit table already holds rows for this "
+        "project + version + endpoint (uploads are additive: re-running "
+        "duplicates the records)",
+    )
     parser.add_argument(
         "--debug", action="store_true",
         help="Enable debug logging"
@@ -136,6 +144,32 @@ def main():
         aws_profile=aws_profile,
         aws_region=aws_region,
     )
+
+    # Pre-flight: uploads are additive, so re-running one silently doubles
+    # the project's records at that version. Refuse when the audit table
+    # already holds rows for this project + version + endpoint.
+    if not args.force_reupload:
+        version = submitter._collect_versions_from_metadata_file_list()
+        api_endpoint = infer_api_endpoint_from_jwt(api_key["api_key"])
+        prior = fetch_prior_uploads(
+            database=database,
+            table=table,
+            project_id=project_id,
+            version=version,
+            api_endpoint=api_endpoint,
+            athena_s3_output=athena_s3_output,
+            workgroup=workgroup,
+            boto3_session=session,
+        )
+        if not prior.empty:
+            logger.error(
+                "Refusing to upload: the audit table %s.%s already records an "
+                "upload of project '%s' version %s to %s. Re-running would "
+                "duplicate every record. Bump the release version, or pass "
+                "--force-reupload if the duplication is intended.",
+                database, table, project_id, version, api_endpoint,
+            )
+            sys.exit(2)
 
     try:
         logger.info("Submitting metadata to Gen3.")

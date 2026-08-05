@@ -178,6 +178,65 @@ def test_metadata_upload_all_resolves_each_study(mock_run, _study, _env):
 @patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
 @patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
 @patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_forwards_force_reupload(mock_run, _study, _env):
+    """
+    Background:
+        The duplicate-upload pre-flight lives in the worker
+        (upload_metadata.py exits 2 when the audit table already records
+        this project+version+endpoint). The CLI's only job is to thread the
+        override flag through — if it drops it, the worker can never be
+        overridden from the CLI.
+
+    Inputs:  g3dt metadata upload --study ausdiab --env staging --force-reupload
+    Expected Output: the worker argv contains --force-reupload.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload", "--study", "ausdiab", "--env", "staging",
+         "--force-reupload"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--force-reupload" in _argv(mock_run)
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_omits_force_reupload_by_default(mock_run, _study, _env):
+    """
+    Inputs:  g3dt metadata upload without the flag
+    Expected Output: the worker argv does NOT contain --force-reupload, so
+    the pre-flight guard stays active.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload", "--study", "ausdiab", "--env", "staging"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--force-reupload" not in _argv(mock_run)
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_forwards_force_reupload(mock_run, _study, _env):
+    """
+    Inputs:  g3dt metadata upload-all ... --force-reupload
+    Expected Output: the bulk wrapper argv carries --force-reupload (it
+    passes it through to each per-study worker).
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab,caughtcad",
+         "--env", "staging", "--force-reupload"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--force-reupload" in _argv(mock_run)
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
 def test_metadata_upload_all_prod_refused_without_allow_prod(mock_run, _study, _env):
     """
     Background:

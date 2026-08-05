@@ -12,10 +12,12 @@ Run upload_metadata.py sequentially for each study.
 Arguments:
   --studies     Comma-separated list of study config keys (e.g. ausdiab_staging,caughtcad_staging)
   --env         Environment string passed to the Python script (e.g. staging_ec2)
-  --allow-prod  Permit running against a production environment. Without it any
-                'prod' in --env or --studies aborts. The g3dt CLI adds this flag
-                only after a local typed confirmation — prefer invoking via
-                'g3dt metadata upload-all' rather than passing it by hand.
+  --allow-prod      Permit running against a production environment. Without it
+                    any 'prod' in --env or --studies aborts. The g3dt CLI adds
+                    this flag only after a local typed confirmation — prefer
+                    invoking via 'g3dt metadata upload-all'.
+  --force-reupload  Passed through to upload_metadata.py: proceed even when the
+                    audit table already records this project+version+endpoint.
 
 Run via the g3dt CLI:
   g3dt metadata upload-all \\
@@ -31,6 +33,7 @@ EOF
 STUDIES=""
 ENV=""
 ALLOW_PROD="false"
+FORCE_REUPLOAD="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +47,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --allow-prod)
             ALLOW_PROD="true"
+            shift
+            ;;
+        --force-reupload)
+            FORCE_REUPLOAD="true"
             shift
             ;;
         *)
@@ -93,8 +100,9 @@ for study in "${STUDY_LIST[@]}"; do
     echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Starting upload for study: ${study}"
     echo "--------------------------------------------"
 
-    if python3 "${SCRIPT_DIR}/upload_metadata.py" \
-        --study "$study" --env "$ENV"; then
+    UPLOAD_ARGS=(--study "$study" --env "$ENV")
+    [[ "$FORCE_REUPLOAD" == "true" ]] && UPLOAD_ARGS+=(--force-reupload)
+    if python3 "${SCRIPT_DIR}/upload_metadata.py" "${UPLOAD_ARGS[@]}"; then
         echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Completed successfully: ${study}"
     else
         EXIT_CODE=$?
