@@ -28,6 +28,7 @@ awswrangler = ">=3.14.0,<4.0.0"
 pyarrow = ">=14.0.0,<19.0.0"
 gen3-metadata = ">=1.4.0,<2.0.0"
 typer = ">=0.12"
+openpyxl = ">=3.1.0"
 
 [tool.poetry.scripts]
 g3dt = "g3dt.cli.main:main"
