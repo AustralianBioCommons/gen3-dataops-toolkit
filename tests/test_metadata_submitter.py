@@ -448,3 +448,70 @@ def test_infer_api_endpoint_from_jwt_appends_api_version():
     assert infer_api_endpoint_from_jwt(
         _fake_jwt("https://staging.commons.example.org/user")
     ) == "https://staging.commons.example.org/api/v0"
+
+
+def test_fetch_prior_uploads_scopes_to_project_version_and_endpoint():
+    """
+    Test that the duplicate-upload pre-flight query cannot mix environments.
+
+    Background:
+        metadata upload is purely additive: re-running one silently doubles
+        the project's records at that version (observed live as an audit
+        table holding exactly 2x the per-run row count). The pre-flight asks
+        the audit table "has this exact upload happened before?" — and it
+        must scope by api_endpoint, or a staging upload would spuriously
+        block (or mask) a prod one.
+
+    Inputs:  project 'EDCAD-PMS', version 0.9.8, a specific endpoint
+    Expected Output: all three appear in the WHERE clause.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from g3dt.upload.metadata_submitter import fetch_prior_uploads
+
+    with patch(
+        "g3dt.upload.metadata_submitter.wr.athena.read_sql_query",
+        return_value=MagicMock(),
+    ) as mock_query:
+        fetch_prior_uploads(
+            database="db", table="metadata_upload_iceberg",
+            project_id="EDCAD-PMS", version="0.9.8",
+            api_endpoint="https://commons.example.org/api/v0",
+            athena_s3_output="s3://out/",
+        )
+
+    sql = mock_query.call_args[0][0]
+    assert "project_id = 'EDCAD-PMS'" in sql
+    assert "version = '0.9.8'" in sql
+    assert "api_endpoint = 'https://commons.example.org/api/v0'" in sql
+
+
+def test_fetch_prior_uploads_treats_a_missing_table_as_first_upload():
+    """
+    Test that a brand-new environment does not fail the pre-flight.
+
+    Background:
+        A fresh environment has no metadata_upload table yet. That is the
+        normal first-run state — the pre-flight must return "no prior
+        uploads" and let the upload proceed, not abort on the Athena error.
+
+    Inputs:  an Athena query that raises (table does not exist)
+    Expected Output: an empty DataFrame with the expected columns, no raise.
+    """
+    from unittest.mock import patch
+
+    from g3dt.upload.metadata_submitter import fetch_prior_uploads
+
+    with patch(
+        "g3dt.upload.metadata_submitter.wr.athena.read_sql_query",
+        side_effect=Exception("TABLE_NOT_FOUND"),
+    ):
+        result = fetch_prior_uploads(
+            database="db", table="metadata_upload_iceberg",
+            project_id="EDCAD-PMS", version="0.9.8",
+            api_endpoint="https://commons.example.org/api/v0",
+            athena_s3_output="s3://out/",
+        )
+
+    assert result.empty
+    assert list(result.columns) == ["project_id", "version"]

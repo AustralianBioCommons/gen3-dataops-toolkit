@@ -22,9 +22,18 @@ def upload(
     study: str = typer.Option(..., "--study", "-s", help="Study, e.g. ausdiab."),
     env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
     node: str = typer.Option(None, "--node", help="Submit only this node type."),
+    force_reupload: bool = typer.Option(
+        False, "--force-reupload",
+        help="Proceed even if this project+version was already uploaded to "
+        "this commons (uploads are additive: re-running duplicates records).",
+    ),
     on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
 ) -> None:
     """Upload a study's release metadata to Gen3 sheepdog.
+
+    The worker refuses (exit 2) when the audit table already records an
+    upload of the same project + version + endpoint — re-running would
+    duplicate every record. ``--force-reupload`` overrides.
 
     Examples:
       g3dt metadata upload --study ausdiab --env staging
@@ -36,12 +45,16 @@ def upload(
         a = ["--study", s.key, "--env", env_name]
         if node:
             a += ["--specific-node", node]
+        if force_reupload:
+            a.append("--force-reupload")
         return a
 
     def remote_cli(env_name):
         a = ["metadata", "upload", "--study", study, "--env", env_name]
         if node:
             a += ["--node", node]
+        if force_reupload:
+            a.append("--force-reupload")
         return a
 
     dispatch.run_or_dispatch(
@@ -63,6 +76,11 @@ def upload_all(
         False, "--prod-confirmed", hidden=True,
         help="Internal: set by the remote re-entry after the typed "
         "confirmation already happened locally. Never pass by hand.",
+    ),
+    force_reupload: bool = typer.Option(
+        False, "--force-reupload",
+        help="Proceed even for project+versions the audit table says were "
+        "already uploaded to this commons.",
     ),
     on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
 ) -> None:
@@ -95,6 +113,8 @@ def upload_all(
         a = ["--studies", ",".join(keys), "--env", env_name]
         if allow_prod:
             a.append("--allow-prod")
+        if force_reupload:
+            a.append("--force-reupload")
         return a
 
     def remote_cli(env_name):
@@ -103,6 +123,8 @@ def upload_all(
             # The typed confirmation already happened locally above; the box
             # has no TTY, so the re-entry must not prompt again.
             a += ["--allow-prod", "--prod-confirmed"]
+        if force_reupload:
+            a.append("--force-reupload")
         return a
 
     dispatch.run_or_dispatch(

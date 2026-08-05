@@ -56,16 +56,82 @@ def _normalise_version(raw: str, where: str) -> str:
     return match.group(1)
 
 
+def _parse_study_specs(studies: str, fallback, env: str):
+    """Turn ``--studies`` into ``[(resolved_study_key, version), ...]``.
+
+    Each comma-separated entry is ``name`` or ``name:version``. A bare name
+    takes *fallback* (the ``--version`` default); *fallback* is ``None`` when
+    ``--version`` was not given, which makes a bare name a usage error.
+
+    Every entry is validated before anything is dispatched, so a typo in the
+    last study cannot leave the earlier ones already deleted.
+    """
+    specs = []
+    for entry in studies.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        # partition() rather than split(), so a trailing colon ("ausdiab:") is
+        # distinguishable from a bare name and can be rejected instead of
+        # silently taking the fallback.
+        name, sep, raw_version = entry.partition(":")
+        name = name.strip()
+
+        if not name:
+            typer.secho(
+                f"Invalid --studies entry '{entry}': missing study name.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(2)
+
+        if sep and not raw_version.strip():
+            typer.secho(
+                f"Invalid --studies entry '{entry}': ':' with no version. "
+                f"Use '{name}:0.9.8', '{name}:all', or a bare '{name}' to take "
+                "the --version default.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(2)
+
+        if sep:
+            version = _normalise_version(raw_version, f"for study '{name}'")
+        elif fallback is not None:
+            version = fallback
+        else:
+            typer.secho(
+                f"No version for study '{name}': add ':<version>' to it "
+                f"(e.g. '{name}:0.9.8'), or pass --version as the default for "
+                "every study. Use 'all' to delete every version.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(2)
+
+        specs.append((study_of(name, env).key, version))
+
+    if not specs:
+        typer.secho("--studies is empty.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    return specs
+
+
 @app.command()
 def metadata(
     studies: str = typer.Option(
-        ..., "--studies", help="Comma-separated studies, e.g. ausdiab,caughtcad."
+        ...,
+        "--studies",
+        help="Comma-separated studies, each optionally 'name:version', "
+             "e.g. ausdiab:0.7.5,cdah:0.8.1,edcad.",
     ),
     env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
     version: str = typer.Option(
         None,
         "--version",
-        help="Metadata version to delete, e.g. 0.9.8, or 'all' for every version.",
+        help="Default version for studies written without their own "
+             "':version', e.g. 0.9.8, or 'all' for every version.",
     ),
     node: str = typer.Option(None, "--node", help="Delete only this node type."),
     yes: bool = typer.Option(
@@ -77,55 +143,65 @@ def metadata(
 
     Studies are processed one at a time. A study that exists but has no data at
     the requested version is skipped, and the job continues to the next study.
+
+    Each study may carry its own version as ``name:version``; ``--version``
+    supplies the default for any study written bare. Examples:
+
+      g3dt delete metadata --studies "ausdiab:0.7.5,cdah:0.8.1" --env staging
+      g3dt delete metadata --studies "ausdiab:all,cdah" --version 0.9.8 --env staging
     """
-    if version is None:
-        typer.secho(
-            "--version is required: specify a version (e.g. 0.9.8) or 'all' "
-            "to delete every version.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(2)
+    fallback = (
+        _normalise_version(version, "for --version") if version is not None else None
+    )
+    specs = _parse_study_specs(studies, fallback, env)
+    versions = [v for _, v in specs]
 
-    version = _normalise_version(version, "for --version")
+    # The typed production confirmation stays the study keys alone: short
+    # enough to retype accurately, while the per-study versions are spelled
+    # out in the action line printed directly above the prompt.
+    target = ",".join(key for key, _ in specs)
+    uniform = len(set(versions)) == 1
+    any_all = "all" in versions
 
-    names = [s.strip() for s in studies.split(",") if s.strip()]
-    keys = [study_of(name, env).key for name in names]
-    target = ",".join(keys)
-    all_versions = version == "all"
-
-    if all_versions:
-        # Deleting every version is the most destructive path: always prompt
-        # (pass assume_yes=False so --yes can't bypass it; prod still types the
-        # target).
-        safety.confirm_destructive("deletion of ALL VERSIONS", target, env, False)
+    if uniform and versions[0] == "all":
+        action = "deletion of ALL VERSIONS"
+    elif uniform:
+        action = f"deletion of v{versions[0]}"
     else:
-        safety.confirm_destructive(f"deletion of v{version}", target, env, yes)
+        plan = ", ".join(f"{key}:{v}" for key, v in specs)
+        action = f"deletion of per-study versions [{plan}]"
+
+    # Deleting every version is the most destructive path: always prompt (pass
+    # assume_yes=False so --yes can't bypass it; prod still types the target).
+    # One 'all' anywhere in the list is enough to force the prompt, so an 'all'
+    # buried mid-list cannot ride along on a batch marked unattended.
+    safety.confirm_destructive(action, target, env, False if any_all else yes)
 
     def build_args(env_name):
-        a = [
-            "--studies",
-            target,
-            "--env",
-            env_name,
-            "--version",
-            "all" if all_versions else version,
-        ]
+        if uniform:
+            # Canonical (and historical) shape: one --version for every study.
+            # Emitting it keeps a newer CLI compatible with an older installed
+            # service script on the box, which can lag a pip upgrade.
+            a = ["--studies", target, "--env", env_name, "--version", versions[0]]
+        else:
+            a = [
+                "--studies",
+                ",".join(f"{key}:{v}" for key, v in specs),
+                "--env",
+                env_name,
+            ]
         if node:
             a += ["--node", node]
         return a
 
     def remote_cli(env_name):
         # --yes: confirmation already happened locally; the remote job must
-        # not prompt (SSM has no TTY). The remote re-check is version-specific
-        # only, and 'all' was already confirmed above.
-        a = [
-            "delete", "metadata",
-            "--studies", studies,
-            "--env", env_name,
-            "--version", "all" if all_versions else version,
-            "--yes",
-        ]
+        # not prompt (SSM has no TTY). The raw --studies string is forwarded
+        # verbatim — the remote re-entry re-parses and re-validates it.
+        a = ["delete", "metadata", "--studies", studies, "--env", env_name]
+        if version is not None:
+            a += ["--version", version]
+        a.append("--yes")
         if node:
             a += ["--node", node]
         return a

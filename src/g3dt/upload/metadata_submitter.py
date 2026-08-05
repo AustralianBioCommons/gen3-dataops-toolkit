@@ -12,6 +12,7 @@ import jwt
 import requests
 from typing import Any, Dict, List, Optional
 import re
+import awswrangler as wr
 import pandas as pd
 import uuid
 from g3dt.utils.athena_utils import write_iceberg_to_db
@@ -473,6 +474,56 @@ def get_gen3_api_key_aws_secret(secret_name: str, region_name: str, session) -> 
     except (json.JSONDecodeError, TypeError) as e:
         logger.error("Error parsing Gen3 API key from AWS Secrets Manager: %s", e)
         raise
+
+
+def fetch_prior_uploads(
+    database: str,
+    table: str,
+    project_id: str,
+    version: str,
+    api_endpoint: str,
+    athena_s3_output: str,
+    workgroup: str = "primary",
+    boto3_session=None,
+) -> pd.DataFrame:
+    """Return audit rows already recorded for this project+version+endpoint.
+
+    ``metadata upload`` is purely additive: re-running it doubles the
+    project's records for that version with nothing to flag it — observed
+    live as an audit table holding exactly 2x the per-run row count for
+    several study/version pairs. Callers use this pre-flight to refuse (or
+    warn on) an upload the audit table says has already happened.
+
+    Scoped to one api_endpoint so a staging upload can never mask — or
+    spuriously block — a prod one.
+
+    A missing table means nothing has ever been uploaded in this
+    environment, which is a normal first-run state, not an error — an empty
+    frame is returned so the caller proceeds.
+    """
+    sql = (
+        f'SELECT DISTINCT project_id, version '
+        f'FROM "{database}"."{table}" '
+        f"WHERE project_id = '{project_id}' "
+        f"AND version = '{version}' "
+        f"AND api_endpoint = '{api_endpoint}'"
+    )
+    try:
+        return wr.athena.read_sql_query(
+            sql,
+            database=database,
+            ctas_approach=False,
+            workgroup=workgroup,
+            s3_output=athena_s3_output,
+            boto3_session=boto3_session,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not read prior uploads from %s.%s (%s). "
+            "Treating this as a first upload.",
+            database, table, exc,
+        )
+        return pd.DataFrame(columns=["project_id", "version"])
 
 
 def commons_url_from_jwt(jwt_token: str) -> str:

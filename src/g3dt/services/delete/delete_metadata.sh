@@ -10,19 +10,21 @@ SKIP_EXIT_CODE=3
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") --studies <comma-separated-studies> --env <environment> --version <version|all> [--node <node>]
+Usage: $(basename "$0") --studies <name[:version|all],...> --env <environment> [--version <version|all>] [--node <node>]
 
 Delete metadata for each study sequentially, in a single job.
 
 Arguments:
-  --studies   Comma-separated list of study config keys (e.g. ausdiab_staging,caughtcad_staging)
+  --studies   Comma-separated study config keys, each optionally qualified with
+              its own version (e.g. ausdiab_staging:0.7.5,cdah_staging:0.8.1,
+              or bare ausdiab_staging to take the --version default)
   --env       Environment string passed to the Python worker (e.g. staging_ec2)
-  --version   Metadata version to delete (e.g. 0.9.8), or 'all' for every version
+  --version   Default version for bare --studies entries (e.g. 0.9.8), or 'all'
   --node      (optional) Restrict deletion to a single node type
 
 Behaviour:
-  * --version all          -> delete_all_metadata_for_project.py (deletes whole nodes)
-  * --version <x.y.z>      -> delete_metadata_by_guid.py (Athena GUID lookup for that version)
+  * version 'all'          -> delete_all_metadata_for_project.py (deletes whole nodes)
+  * version <x.y.z>        -> delete_metadata_by_guid.py (Athena GUID lookup for that version)
 
   A study that exists but has no data at the requested version is skipped and the
   loop continues. Only genuine errors (Gen3/AWS failures) count as failures.
@@ -69,13 +71,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$STUDIES" || -z "$ENV" || -z "$VERSION" ]]; then
-    echo "ERROR: --studies, --env and --version are required."
+if [[ -z "$STUDIES" || -z "$ENV" ]]; then
+    echo "ERROR: --studies and --env are required."
     usage
 fi
 
-# Lower-case the version so 'ALL'/'All' are treated as 'all'.
-VERSION_LC="$(echo "$VERSION" | tr '[:upper:]' '[:lower:]')"
+# Expand '--studies name[:version],...' into two parallel arrays. An entry with
+# no ':version' takes the --version default. Validating the whole list up front
+# means a typo in the last entry cannot leave the earlier studies already
+# deleted.
+IFS=',' read -ra STUDY_ENTRIES <<< "$STUDIES"
+STUDY_NAMES=()
+STUDY_VERSIONS=()
+for entry in "${STUDY_ENTRIES[@]}"; do
+    name="${entry%%:*}"
+    # Test for the ':' explicitly: for a bare 'name', "${entry#*:}" expands to
+    # 'name' rather than to the empty string, which would silently become the
+    # version.
+    if [[ "$entry" == *:* ]]; then
+        entry_version="${entry#*:}"
+    else
+        entry_version="$VERSION"
+    fi
+    if [[ -z "$name" ]]; then
+        echo "ERROR: empty study name in --studies entry '${entry}'."
+        usage
+    fi
+    if [[ -z "$entry_version" ]]; then
+        echo "ERROR: study '${name}' has no version: use '${name}:<version|all>' in --studies, or pass --version as the default."
+        usage
+    fi
+    STUDY_NAMES+=("$name")
+    STUDY_VERSIONS+=("$entry_version")
+done
 
 # ---------- Setup ----------
 # Logs go outside the installed package.
@@ -84,7 +112,6 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 FAILED_LOG="${LOG_DIR}/${TIMESTAMP}_delete_failed.log"
 mkdir -p "${LOG_DIR}"
 
-IFS=',' read -ra STUDY_LIST <<< "$STUDIES"
 DELETED_COUNT=0
 SKIPPED_COUNT=0
 FAIL_COUNT=0
@@ -93,25 +120,30 @@ echo "============================================"
 echo "Metadata delete started at $(date)"
 echo "Environment : ${ENV}"
 echo "Studies     : ${STUDIES}"
-echo "Version     : ${VERSION}"
+echo "Version     : ${VERSION:-(per study, from --studies)}"
 [[ -n "$NODE" ]] && echo "Node        : ${NODE}"
 echo "Failure log : ${FAILED_LOG}"
 echo "============================================"
 echo ""
 
 # ---------- Sequential execution ----------
-for study in "${STUDY_LIST[@]}"; do
+for i in "${!STUDY_NAMES[@]}"; do
+    study="${STUDY_NAMES[$i]}"
+    study_version="${STUDY_VERSIONS[$i]}"
+    # Lower-cased for the 'all' comparison only; the worker gets the original.
+    study_version_lc="$(echo "$study_version" | tr '[:upper:]' '[:lower:]')"
+
     echo "--------------------------------------------"
-    echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Starting deletion for study: ${study} (version: ${VERSION})"
+    echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Starting deletion for study: ${study} (version: ${study_version})"
     echo "--------------------------------------------"
 
-    if [[ "$VERSION_LC" == "all" ]]; then
+    if [[ "$study_version_lc" == "all" ]]; then
         CMD=(python3 "${SCRIPT_DIR}/delete_all_metadata_for_project.py"
              --study "$study" --env "$ENV")
         [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     else
         CMD=(python3 "${SCRIPT_DIR}/delete_metadata_by_guid.py"
-             --study "$study" --env "$ENV" --version "$VERSION" --skip-if-empty)
+             --study "$study" --env "$ENV" --version "$study_version" --skip-if-empty)
         [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     fi
 
@@ -125,12 +157,14 @@ for study in "${STUDY_LIST[@]}"; do
         echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Completed: ${study}"
         DELETED_COUNT=$((DELETED_COUNT + 1))
     elif [[ $EXIT_CODE -eq $SKIP_EXIT_CODE ]]; then
-        echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Skipped (no data at version ${VERSION}): ${study}"
+        echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Skipped (no data at version ${study_version}): ${study}"
         SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
         echo "[$(date +%Y-%m-%d\ %H:%M:%S)] FAILED: ${study} (exit code ${EXIT_CODE})"
-        echo "[$(date +%Y-%m-%d\ %H:%M:%S)] ${study} exit_code=${EXIT_CODE}" >> "$FAILED_LOG"
+        # The version is recorded because one job can now delete two versions
+        # of the same study.
+        echo "[$(date +%Y-%m-%d\ %H:%M:%S)] ${study} version=${study_version} exit_code=${EXIT_CODE}" >> "$FAILED_LOG"
     fi
 
     echo ""
@@ -139,7 +173,7 @@ done
 # ---------- Summary ----------
 echo "============================================"
 echo "Metadata delete finished at $(date)"
-echo "Total studies : ${#STUDY_LIST[@]}"
+echo "Total studies : ${#STUDY_NAMES[@]}"
 echo "Deleted       : ${DELETED_COUNT}"
 echo "Skipped       : ${SKIPPED_COUNT}"
 echo "Failures      : ${FAIL_COUNT}"
