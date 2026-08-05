@@ -30,6 +30,8 @@ from g3dt.upload.metadata_submitter import (
 )
 from g3dt.indexd.indexd_registrar import (
     scan_s3_files,
+    fetch_registered_files,
+    filter_unregistered,
     register_files_with_indexd,
     write_to_glue,
 )
@@ -80,6 +82,12 @@ def main():
         action="store_true",
         help="Scan and write file_metadata only; skip indexd "
         "registration",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-register files even if already recorded in the "
+        "registry with the same md5",
     )
 
     args = parser.parse_args()
@@ -185,6 +193,36 @@ def main():
     if args.dry_run:
         logger.info("Dry run — skipping indexd registration.")
         sys.exit(0)
+
+    # --- Skip files already registered at this endpoint (same name + md5) ---
+    # Re-submitting creates a NEW indexd revision per run (baseid never
+    # overwrites), so an unfiltered re-run duplicates the corpus. A changed
+    # md5 is deliberately NOT skipped — that is when a new revision is wanted.
+    if args.force:
+        logger.info(
+            "--force given: re-registering all %d scanned file(s).",
+            len(file_df),
+        )
+    else:
+        registered = fetch_registered_files(
+            database=reg_database,
+            table=reg_table,
+            study_id=args.study,
+            indexd_endpoint=indexd_endpoint,
+            athena_s3_output=athena_s3_output,
+            workgroup=workgroup,
+            boto3_session=session,
+        )
+        before = len(file_df)
+        file_df = filter_unregistered(file_df, registered)
+        logger.info(
+            "Skipping %d / %d file(s) already registered with the same md5 "
+            "(use --force to re-register).",
+            before - len(file_df), before,
+        )
+        if file_df.empty:
+            logger.info("Nothing new to register. Done.")
+            sys.exit(0)
 
     auth = Gen3Auth(refresh_token=api_key)
     index = Gen3Index(auth)

@@ -27,9 +27,17 @@ def register(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Scan + write file_metadata only; skip indexd."
     ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-register files already in the registry with the same md5.",
+    ),
     on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
 ) -> None:
     """Scan S3 prefixes and register the files with Gen3 indexd.
+
+    Files already registered for this study at this endpoint with an unchanged
+    md5 are skipped (each re-registration would create a new indexd revision
+    and duplicate the registry). ``--force`` re-registers everything.
 
     Examples:
       g3dt indexd register --s3-paths s3://bucket/edcad/ --study edcad --env staging
@@ -41,6 +49,8 @@ def register(
         a = ["--s3-paths", *s3_paths, "--study", s.key, "--env", env_name]
         if dry_run:
             a.append("--dry-run")
+        if force:
+            a.append("--force")
         return a
 
     def remote_cli(env_name):
@@ -50,6 +60,8 @@ def register(
         a += ["--study", study, "--env", env_name]
         if dry_run:
             a.append("--dry-run")
+        if force:
+            a.append("--force")
         return a
 
     dispatch.run_or_dispatch(

@@ -33,18 +33,6 @@ def require_test_env(env: str) -> None:
         raise typer.Exit(2)
 
 
-def abort_if_prod(env: str) -> None:
-    """Hard abort for bulk operations that must never touch production."""
-    if is_prod(env):
-        typer.secho(
-            f"Refusing bulk operation against a production environment "
-            f"('{env}').",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(2)
-
-
 def confirm_destructive(action: str, target: str, env: str, assume_yes: bool) -> None:
     """Gate a destructive operation with an appropriate confirmation.
 

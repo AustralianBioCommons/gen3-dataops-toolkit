@@ -475,12 +475,40 @@ def get_gen3_api_key_aws_secret(secret_name: str, region_name: str, session) -> 
         raise
 
 
+def commons_url_from_jwt(jwt_token: str) -> str:
+    """Derive the bare commons base URL from an API key's JWT.
+
+    The ``iss`` claim is ``https://<commons>/user``; stripping the service
+    suffix yields the base URL the key authenticates against — so the API key
+    itself selects the environment (test/staging/prod), and there is no URL
+    for an operator to get wrong.
+
+    This matters because ``gen3.auth.Gen3Auth`` silently falls back to the
+    Workspace Token Service whenever an explicitly-passed ``endpoint``
+    disagrees with the credential's issuer. WTS is not deployed on these
+    commons, so that path dies with a misleading ``502 Bad Gateway`` on
+    ``/wts/external_oidc/``. Constructing ``Gen3Auth(refresh_token=key)``
+    with NO endpoint never enters that branch — keep it structurally
+    impossible rather than merely guarded.
+    """
+    url = jwt.decode(
+        jwt_token,
+        options={"verify_signature": False},
+    ).get('iss', '')
+    if url.endswith('/user'):
+        url = url[: -len('/user')]
+    return url.rstrip('/')
+
+
 def infer_api_endpoint_from_jwt(
     jwt_token: str,
     api_version: str = 'v0',
 ) -> str:
     """
-    Extract the API endpoint URL from a JSON Web Token (JWT) credential.
+    Extract the sheepdog API endpoint URL from a JWT credential.
+
+    Delegates the base-URL derivation to :func:`commons_url_from_jwt` and
+    appends the API suffix.
 
     Args:
         jwt_token (str): The JSON Web Token (JWT) credential.
@@ -491,13 +519,7 @@ def infer_api_endpoint_from_jwt(
         str: The extracted API endpoint URL.
     """
     logger.info("Decoding JWT to extract API URL.")
-    url = jwt.decode(
-        jwt_token,
-        options={"verify_signature": False},
-    ).get('iss', '')
-    if '/user' in url:
-        url = url.split('/user')[0]
-    url = f"{url}/api/{api_version}"
+    url = f"{commons_url_from_jwt(jwt_token)}/api/{api_version}"
     logger.info("Extracted API URL from JWT: %s", url)
     return url
 

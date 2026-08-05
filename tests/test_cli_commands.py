@@ -176,6 +176,100 @@ def test_metadata_upload_all_resolves_each_study(mock_run, _study, _env):
 
 
 @patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_refused_without_allow_prod(mock_run, _study, _env):
+    """
+    Background:
+        Bulk upload against production used to be impossible (the wrapped
+        script hard-aborted on any 'prod') while showing no local guard at
+        all. The gate makes prod possible but deliberate: without
+        --allow-prod the CLI refuses before anything is dispatched.
+
+    Inputs:  --env prod, no --allow-prod
+    Expected Output: exit 2, the wrapped script is never invoked.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab", "--env", "prod"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "--allow-prod" in result.output
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_with_flag_requires_typed_confirmation(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        --allow-prod alone is not enough: the operator must type the env
+        name exactly (confirm_prod_strict), locally, BEFORE any dispatch —
+        SSM has no TTY so a remote prompt could never be answered.
+
+    Inputs:  --env prod --allow-prod, then 'prod' typed at the prompt
+    Expected Output: exit 0 and the wrapped script receives --allow-prod.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab", "--env", "prod",
+         "--allow-prod"],
+        input="prod\n",
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert "--allow-prod" in argv
+    i = argv.index("--studies")
+    assert argv[i + 1] == "ausdiab_prod"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_mismatched_confirmation_aborts(
+    mock_run, _study, _env
+):
+    """
+    Inputs:  --env prod --allow-prod, but 'staging' typed at the prompt
+    Expected Output: non-zero exit, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab", "--env", "prod",
+         "--allow-prod"],
+        input="staging\n",
+    )
+    assert result.exit_code != 0
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_prod_study_key_trips_the_gate(mock_run, _study, _env):
+    """
+    Background:
+        The env alone does not determine where the write lands: a study key
+        can resolve to another environment's commons. `--env staging
+        --studies ausdiab_prod` is a production write and must be gated
+        exactly like --env prod.
+
+    Inputs:  --env staging with a study whose resolved key contains 'prod'
+    Expected Output: exit 2 without --allow-prod.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab_prod",
+         "--env", "staging"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
 @patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
 @patch("g3dt.cli._internal.runner.run")
 def test_delete_metadata_specific_version_builds_argv(mock_run, _study, _env):
@@ -222,6 +316,56 @@ def test_delete_metadata_all_versions_passes_all(mock_run, _study, _env):
     assert argv[1].endswith("services/delete/delete_metadata.sh")
     j = argv.index("--version")
     assert argv[j + 1] == "all"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_strips_leading_v_from_version(mock_run, _study, _env):
+    """
+    Background:
+        Athena stores the release version without a leading 'v' — the uploader
+        parses it out of the S3 path and keeps only group(1) of ^v?(x.y.z)$.
+        The delete query interpolates the operator's string literally, so a
+        'v'-prefixed version matches zero rows; the bulk wrapper then reports
+        exit 3 as "skipped" and the run looks clean while deleting nothing.
+        Normalising in the CLI closes that silent no-op.
+
+    Inputs:  --version V0.9.8 (case and prefix both wrong)
+    Expected Output: the wrapper receives exactly 0.9.8.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab",
+         "--env", "staging", "--version", "V0.9.8", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[argv.index("--version") + 1] == "0.9.8"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_rejects_malformed_version(mock_run, _study, _env):
+    """
+    Background:
+        The upload path only ever writes three-part semver into the version
+        column, so a truncated version like 0.9 can never match a row. Left
+        unchecked it deletes nothing and is counted as a skip — invisible to
+        the operator. Rejecting it loudly refuses no valid input.
+
+    Inputs:  --version 0.9
+    Expected Output: exit 2, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab",
+         "--env", "staging", "--version", "0.9", "--yes"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "Invalid version" in result.output
 
 
 @patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)

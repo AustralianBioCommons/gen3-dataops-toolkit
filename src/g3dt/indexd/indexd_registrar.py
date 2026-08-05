@@ -115,6 +115,95 @@ def scan_s3_files(
 
 # ---------- indexd registration ----------
 
+def fetch_registered_files(
+    database: str,
+    table: str,
+    study_id: str,
+    indexd_endpoint: str,
+    athena_s3_output: str,
+    workgroup: str = "primary",
+    boto3_session: Optional[boto3.Session] = None,
+) -> pd.DataFrame:
+    """Return the ``file_name``/``md5`` pairs already registered for a study.
+
+    Scoped to one study and one indexd endpoint so a staging registration can
+    never mask a missing prod one (and vice versa).
+
+    A missing table means nothing has ever been registered for this
+    environment, which is a normal first-run state, not an error — an empty
+    frame is returned so the caller registers everything.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``file_name`` and ``md5``; empty if the table does not exist.
+    """
+    sql = f"""
+        SELECT DISTINCT file_name, md5
+        FROM "{database}"."{table}"
+        WHERE study_id = '{study_id}'
+          AND indexd_endpoint = '{indexd_endpoint}'
+    """
+    try:
+        return wr.athena.read_sql_query(
+            sql,
+            database=database,
+            ctas_approach=False,
+            workgroup=workgroup,
+            s3_output=athena_s3_output,
+            boto3_session=boto3_session,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not read existing registrations from %s.%s (%s). "
+            "Treating every scanned file as unregistered.",
+            database, table, exc,
+        )
+        return pd.DataFrame(columns=["file_name", "md5"])
+
+
+def filter_unregistered(
+    df: pd.DataFrame,
+    registered: pd.DataFrame,
+) -> pd.DataFrame:
+    """Drop scanned files already registered with the same name and md5.
+
+    Re-submitting a file to indexd does not overwrite it: because ``baseid``
+    is derived from the filename, indexd creates a *new revision with a new
+    did* every time. Those revisions accumulate in the registry table (which
+    merges on ``did``), so an unfiltered re-run doubles the corpus and forces
+    every downstream join to de-duplicate. Skipping files whose content has
+    not changed makes a re-run a cheap no-op.
+
+    An md5 that differs from the registered one means the file genuinely
+    changed, so it is *not* skipped — that is exactly when a new revision is
+    wanted.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Scanned files; must have ``file_name`` and ``md5``.
+    registered : pd.DataFrame
+        Existing registrations (see :func:`fetch_registered_files`).
+
+    Returns
+    -------
+    pd.DataFrame
+        The subset of *df* still needing registration.
+    """
+    if df.empty or registered.empty:
+        return df
+
+    already = set(
+        zip(registered["file_name"].astype(str), registered["md5"].astype(str))
+    )
+    keep = [
+        (str(name), str(md5)) not in already
+        for name, md5 in zip(df["file_name"], df["md5"])
+    ]
+    return df[pd.Series(keep, index=df.index)]
+
+
 def register_files_with_indexd(
     index: Gen3Index,
     df: pd.DataFrame,
@@ -122,10 +211,12 @@ def register_files_with_indexd(
 ) -> pd.DataFrame:
     """Register files with Gen3 indexd and return results.
 
-    For each row in *df*, calls ``Gen3Index.create_record`` with the
-    file's hashes, size, S3 URL, baseid, and authz.  Re-submitting
-    the same baseid will create a new revision in indexd, making this
-    safe to re-run (idempotent at the API level).
+    For each row in *df*, calls ``Gen3Index.create_record`` with the file's
+    hashes, size, S3 URL, baseid, and authz. Registers exactly what it is
+    given: re-submitting a baseid creates a NEW revision with a new ``did``
+    (indexd never overwrites), so callers must pre-filter already-registered
+    files with :func:`fetch_registered_files` + :func:`filter_unregistered`
+    unless duplicate revisions are intended.
 
     Parameters
     ----------

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import typer
 
-from g3dt.cli._internal import dispatch
+from g3dt.cli._internal import dispatch, safety
 from g3dt.cli._internal.dispatch import Target
 from g3dt.cli._internal.resolve import study_of
 
@@ -55,20 +55,55 @@ def upload_all(
         ..., "--studies", help="Comma-separated studies, e.g. ausdiab,caughtcad."
     ),
     env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    allow_prod: bool = typer.Option(
+        False, "--allow-prod",
+        help="Allow bulk upload against production (typed confirmation required).",
+    ),
+    prod_confirmed: bool = typer.Option(
+        False, "--prod-confirmed", hidden=True,
+        help="Internal: set by the remote re-entry after the typed "
+        "confirmation already happened locally. Never pass by hand.",
+    ),
     on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
 ) -> None:
     """Upload several studies sequentially (wraps upload_all_studies.sh).
 
-    The wrapped script aborts on any 'prod' environment.
+    Production needs ``--allow-prod`` AND a typed confirmation of the env
+    name. The confirmation happens locally, before any EC2 dispatch (SSM has
+    no TTY, so a remote prompt would abort); the remote re-entry carries the
+    hidden ``--prod-confirmed`` marker instead of re-prompting, and
+    ``--allow-prod`` is forwarded so the wrapped script's own guard passes.
     """
     names = [s.strip() for s in studies.split(",") if s.strip()]
     keys = [study_of(name, env).key for name in names]
 
+    # Prod is detected on the resolved study keys as well as on --env:
+    # `--env staging --studies ausdiab_prod` is a production write.
+    if safety.is_prod(env) or any(safety.is_prod(k) for k in keys):
+        if not allow_prod:
+            typer.secho(
+                "Refusing bulk upload against a production environment. "
+                "Re-run with --allow-prod to confirm interactively.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(2)
+        if not prod_confirmed:
+            safety.confirm_prod_strict("bulk metadata upload", env)
+
     def build_args(env_name):
-        return ["--studies", ",".join(keys), "--env", env_name]
+        a = ["--studies", ",".join(keys), "--env", env_name]
+        if allow_prod:
+            a.append("--allow-prod")
+        return a
 
     def remote_cli(env_name):
-        return ["metadata", "upload-all", "--studies", studies, "--env", env_name]
+        a = ["metadata", "upload-all", "--studies", studies, "--env", env_name]
+        if allow_prod:
+            # The typed confirmation already happened locally above; the box
+            # has no TTY, so the re-entry must not prompt again.
+            a += ["--allow-prod", "--prod-confirmed"]
+        return a
 
     dispatch.run_or_dispatch(
         on, env, _UPLOAD_ALL, build_args, "metadata-upload-all",

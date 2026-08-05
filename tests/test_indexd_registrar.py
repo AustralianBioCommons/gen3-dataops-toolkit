@@ -264,7 +264,6 @@ class TestRegisterFilesWithIndexd:
                      "rev": "aabb"}
         Output: DataFrame with 1 row; did="PREFIX/did-1", rev="aabb"
         """
-        mock_gen3_index.get_record.side_effect = Exception("not found")
         mock_gen3_index.create_record.return_value = {
             "did": "PREFIX/did-1",
             "baseid": single_file_df.iloc[0]["baseid"],
@@ -302,7 +301,6 @@ class TestRegisterFilesWithIndexd:
                 create_record returns distinct dids
         Output: DataFrame with 3 rows, each with a unique did
         """
-        mock_gen3_index.get_record.side_effect = Exception("not found")
         mock_gen3_index.create_record.side_effect = [
             {"did": f"PREFIX/did-{i}", "baseid": f"b-{i}", "rev": f"r-{i}"}
             for i in range(1, 4)
@@ -317,12 +315,13 @@ class TestRegisterFilesWithIndexd:
             "PREFIX/did-1", "PREFIX/did-2", "PREFIX/did-3",
         ]
 
-    def test_register_always_uploads(self, mock_gen3_index):
+    def test_register_registers_exactly_what_it_is_given(self, mock_gen3_index):
         """
-        All files should be submitted to indexd regardless of whether
-        the baseid already exists.  Re-submitting the same baseid
-        creates a new revision in indexd, so every file produces a
-        result row.
+        register_files_with_indexd submits every row it receives — the
+        already-registered skip is deliberately the CALLER's job (via
+        fetch_registered_files + filter_unregistered), because re-submitting
+        a baseid creates a new indexd revision with a new did each time.
+        This pins the function's half of that contract: no hidden filtering.
 
         Input:  2-row DataFrame; create_record succeeds for both rows
         Output: DataFrame with 2 rows, create_record called twice
@@ -399,7 +398,6 @@ class TestRegisterFilesWithIndexd:
             ]
         )
 
-        mock_gen3_index.get_record.side_effect = Exception("not found")
         mock_gen3_index.create_record.side_effect = [
             Exception("API error"),
             {"did": "PREFIX/good-did", "baseid": "baseid-good", "rev": "r1"},
@@ -462,3 +460,125 @@ class TestWriteToGlue:
             schema_evolution=False,
             boto3_session=None,
         )
+
+
+# --- Tests for the registration skip (fetch_registered_files / filter_unregistered) ---
+
+def test_filter_unregistered_skips_files_with_the_same_name_and_md5():
+    """
+    An unchanged file already in the registry is not re-registered.
+
+    Background:
+        Re-submitting a file to indexd is NOT a no-op: because baseid is
+        derived from the filename, indexd creates a new revision with a new
+        did every time, and the registry table (which merges on did) gains a
+        row per run. A re-run over an unchanged corpus therefore doubles it —
+        measured on a live deployment as 46,598 registry rows for 23,295
+        unique files. Skipping unchanged files makes a re-run cheap and keeps
+        the registry one row per file.
+
+    Inputs:  two scanned files, one already registered with an identical md5
+    Expected Output: only the unregistered file is returned.
+    """
+    scanned = pd.DataFrame([
+        {"file_name": "a.csv", "md5": "aaa"},
+        {"file_name": "b.csv", "md5": "bbb"},
+    ])
+    registered = pd.DataFrame([{"file_name": "a.csv", "md5": "aaa"}])
+
+    result = registrar.filter_unregistered(scanned, registered)
+
+    assert list(result["file_name"]) == ["b.csv"]
+
+
+def test_filter_unregistered_keeps_a_file_whose_md5_changed():
+    """
+    Changed content still gets registered.
+
+    Background:
+        The skip is keyed on name AND md5 precisely so that a genuinely
+        edited file still produces a new indexd revision. Matching on the
+        filename alone would silently strand updated content at the old did.
+
+    Inputs:  a scanned file whose md5 differs from the registered one
+    Expected Output: the file is returned for registration.
+    """
+    scanned = pd.DataFrame([{"file_name": "a.csv", "md5": "NEW"}])
+    registered = pd.DataFrame([{"file_name": "a.csv", "md5": "OLD"}])
+
+    result = registrar.filter_unregistered(scanned, registered)
+
+    assert list(result["file_name"]) == ["a.csv"]
+
+
+def test_filter_unregistered_registers_everything_on_a_first_run():
+    """
+    First-run case: nothing registered yet, so everything is kept.
+
+    Inputs:  scanned files and an empty registry frame
+    Expected Output: every scanned file is returned unchanged.
+    """
+    scanned = pd.DataFrame([
+        {"file_name": "a.csv", "md5": "aaa"},
+        {"file_name": "b.csv", "md5": "bbb"},
+    ])
+
+    result = registrar.filter_unregistered(
+        scanned, pd.DataFrame(columns=["file_name", "md5"])
+    )
+
+    assert len(result) == 2
+
+
+def test_fetch_registered_files_returns_empty_when_the_table_is_missing():
+    """
+    A missing registry table is treated as "nothing registered".
+
+    Background:
+        A brand-new environment has no indexd_registry table yet. That is a
+        normal first-run state, not an error — the scan must proceed and
+        register everything rather than aborting.
+
+    Inputs:  an Athena query that raises (table does not exist)
+    Expected Output: an empty DataFrame with the expected columns, no raise.
+    """
+    with patch(
+        "g3dt.indexd.indexd_registrar.wr.athena.read_sql_query",
+        side_effect=Exception("TABLE_NOT_FOUND"),
+    ):
+        result = registrar.fetch_registered_files(
+            database="db", table="indexd_registry", study_id="edcad",
+            indexd_endpoint="https://commons.example.org/index/index",
+            athena_s3_output="s3://out/",
+        )
+
+    assert result.empty
+    assert list(result.columns) == ["file_name", "md5"]
+
+
+def test_fetch_registered_files_scopes_to_study_and_endpoint():
+    """
+    The lookup cannot mix environments or studies.
+
+    Background:
+        indexd_registry holds every study and every commons endpoint the
+        deployment has registered against. Without both predicates, a
+        staging registration would mask a missing prod one and a prod
+        release would ship files that were never registered there.
+
+    Inputs:  study 'edcad' and a specific indexd endpoint
+    Expected Output: both appear in the WHERE clause of the query.
+    """
+    with patch(
+        "g3dt.indexd.indexd_registrar.wr.athena.read_sql_query",
+        return_value=MagicMock(),
+    ) as mock_query:
+        registrar.fetch_registered_files(
+            database="db", table="indexd_registry", study_id="edcad",
+            indexd_endpoint="https://commons.example.org/index/index",
+            athena_s3_output="s3://out/",
+        )
+
+    sql = mock_query.call_args[0][0]
+    assert "study_id = 'edcad'" in sql
+    assert "indexd_endpoint = 'https://commons.example.org/index/index'" in sql
