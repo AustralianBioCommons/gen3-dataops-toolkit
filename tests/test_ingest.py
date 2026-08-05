@@ -142,7 +142,19 @@ class TestS3Interactions:
         assert mock_wrangler.s3.read_csv.call_count == 2
     
     def test_get_ingest_true_files(self, mock_wrangler):
-        """Tests filtering of files based on the 'ingest=true' tag."""
+        """
+        Tests filtering of files based on the 'ingest=true' tag.
+
+        Background: get_ingest_true_files now checks tags concurrently with
+        a thread pool — the serial one-GetObjectTagging-per-file scan was
+        the bottleneck on large corpora. Because worker threads can run in
+        any order, this test asserts on the SET of returned files rather
+        than the order of get_tags calls.
+
+        Input: 3 listed files — one tagged ingest=true, one ingest=false,
+        one untagged.
+        Expected: only the ingest=true file is returned.
+        """
         file_list = ["s3://b/f1.csv", "s3://b/f2.csv", "s3://b/f3.csv"]
         mock_wrangler.s3.list_objects.return_value = file_list
 
@@ -153,11 +165,65 @@ class TestS3Interactions:
             if uri == "s3://b/f2.csv":
                 return {'ingest': 'false'}
             return {} # f3 has no tags
-        
+
         with patch('g3dt.ingest.ingest.get_tags', side_effect=get_tags_side_effect):
              ingest_files = ingest_module.get_ingest_true_files("s3://b/")
-        
-        assert ingest_files == ["s3://b/f1.csv"]
+
+        assert set(ingest_files) == {"s3://b/f1.csv"}
+
+    def test_get_ingest_true_files_preserves_listing_order(self, mock_wrangler):
+        """
+        Tests that concurrent tag lookups don't reorder the result.
+
+        get_ingest_true_files checks the 'ingest' tag of each file with a
+        thread pool (one GetObjectTagging round-trip per file was the
+        bottleneck on large buckets). Threads can finish in any order, so
+        this test feeds in 20 files where every second one is tagged
+        ingest=true and asserts the selected files come back in the exact
+        order they were listed. Downstream, partition tracking and ingest
+        summaries assume a deterministic file order.
+
+        Input: 20 listed files, even-numbered ones tagged ingest=true.
+        Expected: exactly the even-numbered files, in listing order.
+        """
+        file_list = [f"s3://b/f{i}.csv" for i in range(20)]
+        mock_wrangler.s3.list_objects.return_value = file_list
+
+        def get_tags_side_effect(uri):
+            index = int(uri.removeprefix("s3://b/f").removesuffix(".csv"))
+            return {'ingest': 'true'} if index % 2 == 0 else {'ingest': 'false'}
+
+        with patch('g3dt.ingest.ingest.get_tags', side_effect=get_tags_side_effect):
+            ingest_files = ingest_module.get_ingest_true_files("s3://b/")
+
+        assert ingest_files == [f"s3://b/f{i}.csv" for i in range(0, 20, 2)]
+
+    def test_get_ingest_true_files_skips_file_when_tag_lookup_fails(self, mock_wrangler):
+        """
+        Tests that one failing tag lookup doesn't lose the other files.
+
+        Tag lookups run in worker threads, so an exception for one file
+        must be caught inside the worker: the file is skipped with a
+        warning while every other file is still checked and returned.
+        Without this isolation, a single deleted or permission-restricted
+        object would abort the whole bucket scan.
+
+        Input: 3 listed files; the tag lookup for the middle one raises.
+        Expected: the two healthy ingest=true files are returned in order,
+        the failing file is simply absent.
+        """
+        file_list = ["s3://b/ok1.csv", "s3://b/broken.csv", "s3://b/ok2.csv"]
+        mock_wrangler.s3.list_objects.return_value = file_list
+
+        def get_tags_side_effect(uri):
+            if uri == "s3://b/broken.csv":
+                raise RuntimeError("access denied")
+            return {'ingest': 'true'}
+
+        with patch('g3dt.ingest.ingest.get_tags', side_effect=get_tags_side_effect):
+            ingest_files = ingest_module.get_ingest_true_files("s3://b/")
+
+        assert ingest_files == ["s3://b/ok1.csv", "s3://b/ok2.csv"]
 
 # --- Tests for Main Ingest Logic ---
 
@@ -208,23 +274,36 @@ class TestIngestPipeline:
         assert combined.loc[0, 'c'] == ""
         assert combined.loc[1, 'a'] == ""
 
+    @patch('g3dt.ingest.ingest.write_parquet_to_db')
     @patch('g3dt.ingest.ingest.write_iceberg_to_db')
     @patch('g3dt.ingest.ingest.prepare_ingest_metadata')
     @patch('g3dt.ingest.ingest.get_head_meta')
     @patch('g3dt.ingest.ingest.read_csv_robust')
     @patch('g3dt.ingest.ingest.get_tags')
-    def test_ingest_table_to_parquet_dataset(
-        self, mock_get_tags, mock_read_csv, mock_get_head, mock_prepare, mock_write_iceberg
+    def test_ingest_table_to_dataset_defaults_to_iceberg(
+        self, mock_get_tags, mock_read_csv, mock_get_head, mock_prepare,
+        mock_write_iceberg, mock_write_parquet
     ):
-        """End-to-end test of the single-file ingest pipeline."""
+        """
+        End-to-end test of the single-file ingest pipeline with default settings.
+
+        The `table_format` parameter defaults to "iceberg", so when it is not
+        supplied the file must be written via write_iceberg_to_db and the
+        Parquet writer must never be touched. This protects the default
+        behavior of every existing caller that doesn't pass table_format.
+
+        Input: one CSV tagged with node 'diagnosis' and table_prefix 'test_prefix'.
+        Expected: write_iceberg_to_db called once for table 'test_prefix_diagnosis',
+        write_parquet_to_db not called, and a summary dict for 1 file.
+        """
         mock_get_tags.return_value = {'study_id': 's1', 'node': 'diagnosis', 'submission_date': '2025-10-30'}
         mock_read_csv.return_value = pd.DataFrame({'snomed': ['123']})
         mock_get_head.return_value = {}
         mock_prepare.return_value = pd.DataFrame({
             'snomed': ['123'], 'study_id': ['s1'], 'submission_date': ['2025-10-30'], 'ingest_file_name': ['diag.csv']
         })
-        
-        result = ingest_module.ingest_table_to_parquet_dataset(
+
+        result = ingest_module.ingest_table_to_dataset(
             s3_uri="s3://b/diag.csv",
             database="test_db",
             table_prefix="test_prefix",
@@ -236,10 +315,173 @@ class TestIngestPipeline:
         mock_write_iceberg.assert_called_once()
         call_args, call_kwargs = mock_write_iceberg.call_args
         assert call_kwargs['table'] == expected_table_name
+        mock_write_parquet.assert_not_called()
 
         # Assert the result dictionary has the expected structure
         assert result['files_processed'] == 1
         assert result['tables_written'] == [expected_table_name]
+
+    @patch('g3dt.ingest.ingest.write_parquet_to_db')
+    @patch('g3dt.ingest.ingest.write_iceberg_to_db')
+    @patch('g3dt.ingest.ingest.prepare_ingest_metadata')
+    @patch('g3dt.ingest.ingest.get_head_meta')
+    @patch('g3dt.ingest.ingest.read_csv_robust')
+    @patch('g3dt.ingest.ingest.get_tags')
+    def test_ingest_table_to_dataset_parquet_format(
+        self, mock_get_tags, mock_read_csv, mock_get_head, mock_prepare,
+        mock_write_iceberg, mock_write_parquet
+    ):
+        """
+        Tests the Parquet write path selected via table_format="parquet".
+
+        Legacy bronze tables (created before the Iceberg migration) are plain
+        Parquet Glue tables; wr.athena.to_iceberg cannot write into them and
+        fails with a confusing "Schema change detected" error. This flag lets
+        an ingest keep appending to those tables, so the test pins down the
+        exact write call the legacy path relied on: the caller-supplied
+        dataset_root, mode, and the three-level partitioning
+        (study_id / submission_date / ingest_file_name).
+
+        Input: one CSV ingested with table_format="parquet",
+        dataset_root="s3://legacy-bronze/", and mode="append".
+        Expected: write_parquet_to_db called once with those values and the
+        legacy partition columns; write_iceberg_to_db not called.
+        """
+        mock_get_tags.return_value = {'study_id': 's1', 'node': 'diagnosis', 'submission_date': '2025-10-30'}
+        mock_read_csv.return_value = pd.DataFrame({'snomed': ['123']})
+        mock_get_head.return_value = {}
+        mock_prepare.return_value = pd.DataFrame({
+            'snomed': ['123'], 'study_id': ['s1'], 'submission_date': ['2025-10-30'], 'ingest_file_name': ['diag.csv']
+        })
+
+        result = ingest_module.ingest_table_to_dataset(
+            s3_uri="s3://b/diag.csv",
+            database="test_db",
+            table_prefix="test_prefix",
+            athena_s3_output="s3://db-root/output/",
+            table_format="parquet",
+            dataset_root="s3://legacy-bronze/",
+            mode="append",
+        )
+
+        mock_write_parquet.assert_called_once()
+        call_args, call_kwargs = mock_write_parquet.call_args
+        assert call_kwargs['table'] == "test_prefix_diagnosis"
+        assert call_kwargs['dataset_root'] == "s3://legacy-bronze/"
+        assert call_kwargs['mode'] == "append"
+        assert call_kwargs['partition_cols'] == ["study_id", "submission_date", "ingest_file_name"]
+        mock_write_iceberg.assert_not_called()
+
+        assert result['files_processed'] == 1
+
+    def test_ingest_table_to_dataset_parquet_requires_dataset_root(self):
+        """
+        Tests that table_format="parquet" without a dataset_root fails fast.
+
+        A Parquet dataset write needs an S3 root path to place the files
+        under (Iceberg tables carry their own location in the Glue catalog,
+        so they don't). Failing before any S3/Glue work happens gives the
+        operator a clear message instead of a partial ingest.
+
+        Input: table_format="parquet" with dataset_root left as None.
+        Expected: ValueError mentioning dataset_root, raised before any
+        AWS call is attempted.
+        """
+        with pytest.raises(ValueError, match="dataset_root is required"):
+            ingest_module.ingest_table_to_dataset(
+                s3_uri="s3://b/diag.csv",
+                database="test_db",
+                table_prefix="test_prefix",
+                athena_s3_output="s3://db-root/output/",
+                table_format="parquet",
+            )
+
+    def test_ingest_table_to_dataset_rejects_unknown_format(self):
+        """
+        Tests that an unsupported table_format is rejected up front.
+
+        Only "iceberg" and "parquet" writers exist. A typo like "delta"
+        should raise immediately rather than silently falling through to
+        one of the writers.
+
+        Input: table_format="delta".
+        Expected: ValueError naming the allowed formats.
+        """
+        with pytest.raises(ValueError, match="table_format must be 'iceberg' or 'parquet'"):
+            ingest_module.ingest_table_to_dataset(
+                s3_uri="s3://b/diag.csv",
+                database="test_db",
+                table_prefix="test_prefix",
+                athena_s3_output="s3://db-root/output/",
+                table_format="delta",
+            )
+
+    @patch('g3dt.ingest.ingest.ingest_table_to_dataset')
+    def test_ingest_table_to_parquet_dataset_alias_is_deprecated(self, mock_new_fn):
+        """
+        Tests the backwards-compatibility alias for the renamed single-file
+        function.
+
+        ingest_table_to_parquet_dataset was renamed to ingest_table_to_dataset
+        when the table_format flag was added (the old name implied Parquet
+        output, but it always wrote Iceberg). Existing callers still import
+        the old name, so it must keep working: it should warn with
+        DeprecationWarning and delegate all arguments to the new function.
+
+        Input: a call to the old name with keyword arguments.
+        Expected: DeprecationWarning emitted, new function called once with
+        the same arguments, and its return value passed through.
+        """
+        mock_new_fn.return_value = {"files_processed": 1}
+
+        with pytest.warns(DeprecationWarning, match="ingest_table_to_parquet_dataset is deprecated"):
+            result = ingest_module.ingest_table_to_parquet_dataset(
+                s3_uri="s3://b/diag.csv",
+                database="test_db",
+                table_prefix="test_prefix",
+                athena_s3_output="s3://db-root/output/",
+            )
+
+        mock_new_fn.assert_called_once_with(
+            s3_uri="s3://b/diag.csv",
+            database="test_db",
+            table_prefix="test_prefix",
+            athena_s3_output="s3://db-root/output/",
+        )
+        assert result == {"files_processed": 1}
+
+    @patch('g3dt.ingest.ingest.ingest_files_to_dataset')
+    def test_ingest_files_to_parquet_dataset_alias_is_deprecated(self, mock_new_fn):
+        """
+        Tests the backwards-compatibility alias for the renamed function.
+
+        ingest_files_to_parquet_dataset was renamed to ingest_files_to_dataset
+        when the table_format flag was added (the old name implied Parquet
+        output, but the default is now Iceberg). Existing Glue job scripts
+        still import the old name, so it must keep working: it should warn
+        with DeprecationWarning and delegate all arguments to the new function.
+
+        Input: a call to the old name with a keyword argument.
+        Expected: DeprecationWarning emitted, new function called once with
+        the same arguments, and its return value passed through.
+        """
+        mock_new_fn.return_value = [{"files_processed": 1}]
+
+        with pytest.warns(DeprecationWarning, match="ingest_files_to_parquet_dataset is deprecated"):
+            result = ingest_module.ingest_files_to_parquet_dataset(
+                s3_uris=["s3://b/diag.csv"],
+                database="test_db",
+                table_prefix="test_prefix",
+                athena_s3_output="s3://db-root/output/",
+            )
+
+        mock_new_fn.assert_called_once_with(
+            s3_uris=["s3://b/diag.csv"],
+            database="test_db",
+            table_prefix="test_prefix",
+            athena_s3_output="s3://db-root/output/",
+        )
+        assert result == [{"files_processed": 1}]
 
 # --- Tests for XLSX Reading ---
 
