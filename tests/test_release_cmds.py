@@ -50,11 +50,11 @@ def _seed(project="etl", env="test"):
     leaves = {
         "meta/region": REGION,
         "buckets/metadata": f"{project}-{env}-metadata-{ACCOUNT}-{REGION}",
-        "buckets/rawSilver": f"{project}-{env}-raw-silver-{ACCOUNT}-{REGION}",
-        "buckets/rawGold": f"{project}-{env}-raw-gold-{ACCOUNT}-{REGION}",
-        "glue/db/rawBronze": f"{project}_{env}_raw_bronze_db",
-        "glue/db/rawSilver": f"{project}_{env}_raw_silver_db",
-        "glue/db/rawGold": f"{project}_{env}_raw_gold_db",
+        "buckets/silver": f"{project}-{env}-silver-{ACCOUNT}-{REGION}",
+        "buckets/gold": f"{project}-{env}-gold-{ACCOUNT}-{REGION}",
+        "glue/db/bronze": f"{project}_{env}_bronze_db",
+        "glue/db/silver": f"{project}_{env}_silver_db",
+        "glue/db/gold": f"{project}_{env}_gold_db",
         "release/db": f"{project}_{env}_dataops_metadata_db",
         "release/table": "releases",
         "athena/workgroup": f"{project}-{env}",
@@ -96,7 +96,7 @@ def test_release_write_resolves_names_from_ssm(mock_run):
     # env's own DBs so shared accounts can't cross-match
     assert kwargs["workgroup"] == "etl-test"
     assert kwargs["search_databases"] == [
-        "etl_test_raw_silver_db", "etl_test_raw_gold_db"
+        "etl_test_silver_db", "etl_test_gold_db"
     ]
     # the resolved target is echoed so a build log always shows where rows go
     assert "etl_test_dataops_metadata_db.releases" in result.output
@@ -144,7 +144,7 @@ def test_release_writer_dry_run_writes_nothing():
         insert_release_row(
             athena_config=athena_config,
             model_name="silver_x",
-            db_name="etl_test_raw_silver_db",
+            db_name="etl_test_silver_db",
             snapshot_id=1,
             committed_at="2026-01-01 00:00:00",
             release_db="etl_test_dataops_metadata_db",
@@ -171,11 +171,11 @@ def test_config_dbt_env_emits_every_dbt_setting():
     assert "export G3DT_ATHENA_WORKGROUP=etl-test" in out
     assert f"export G3DT_ATHENA_OUTPUT=s3://etl-test-athena-results-{ACCOUNT}-{REGION}/" in out
     assert f"export G3DT_REGION={REGION}" in out
-    assert "export G3DT_DB_RAW_BRONZE=etl_test_raw_bronze_db" in out
-    assert "export G3DT_DB_RAW_SILVER=etl_test_raw_silver_db" in out
-    assert "export G3DT_DB_RAW_GOLD=etl_test_raw_gold_db" in out
-    assert f"export G3DT_S3_SILVER_DATA_DIR=s3://etl-test-raw-silver-{ACCOUNT}-{REGION}/dbt/" in out
-    assert f"export G3DT_S3_GOLD_DATA_DIR=s3://etl-test-raw-gold-{ACCOUNT}-{REGION}/dbt/" in out
+    assert "export G3DT_DB_BRONZE=etl_test_bronze_db" in out
+    assert "export G3DT_DB_SILVER=etl_test_silver_db" in out
+    assert "export G3DT_DB_GOLD=etl_test_gold_db" in out
+    assert f"export G3DT_S3_SILVER_DATA_DIR=s3://etl-test-silver-{ACCOUNT}-{REGION}/dbt/" in out
+    assert f"export G3DT_S3_GOLD_DATA_DIR=s3://etl-test-gold-{ACCOUNT}-{REGION}/dbt/" in out
     # no profile configured -> ambient credentials and the default dbt target
     assert "G3DT_AWS_PROFILE" not in out
     assert "G3DT_DBT_TARGET" not in out
@@ -228,13 +228,63 @@ def test_config_dbt_env_emits_ci_isolation_vars():
     result = runner.invoke(app, ["config", "dbt-env", "--env", "test"])
     assert result.exit_code == 0, result.output
     out = result.output
-    assert "export G3DT_DB_RAW_SILVER_CI=ci_etl_test_raw_silver_db" in out
-    assert "export G3DT_DB_RAW_GOLD_CI=ci_etl_test_raw_gold_db" in out
-    assert f"export G3DT_S3_SILVER_DATA_DIR_CI=s3://etl-test-raw-silver-{ACCOUNT}-{REGION}/dbt_ci/" in out
-    assert f"export G3DT_S3_GOLD_DATA_DIR_CI=s3://etl-test-raw-gold-{ACCOUNT}-{REGION}/dbt_ci/" in out
+    assert "export G3DT_DB_SILVER_CI=ci_etl_test_silver_db" in out
+    assert "export G3DT_DB_GOLD_CI=ci_etl_test_gold_db" in out
+    assert f"export G3DT_S3_SILVER_DATA_DIR_CI=s3://etl-test-silver-{ACCOUNT}-{REGION}/dbt_ci/" in out
+    assert f"export G3DT_S3_GOLD_DATA_DIR_CI=s3://etl-test-gold-{ACCOUNT}-{REGION}/dbt_ci/" in out
     # the real names remain unprefixed
-    assert "export G3DT_DB_RAW_SILVER=etl_test_raw_silver_db" in out
-    assert "export G3DT_DB_RAW_GOLD=etl_test_raw_gold_db" in out
+    assert "export G3DT_DB_SILVER=etl_test_silver_db" in out
+    assert "export G3DT_DB_GOLD=etl_test_gold_db" in out
+
+
+@mock_aws
+@patch("g3dt.utils.release_writer.run")
+def test_missing_medallion_keys_fail_loudly(mock_run):
+    """
+    Background:
+        gen3-aws-data-pipeline < v2.0.0 published the medallion names under
+        SSM keys carrying a legacy raw prefix in the leaf name. Toolkit
+        versions < 3 read them with rc.get(), which returns None for
+        an absent key — so a key-name mismatch FAILED SILENTLY: dbt-env
+        dropped the G3DT_DB_* export lines entirely and emitted
+        `s3://None/dbt/` data dirs, and `release write` quietly fell back to
+        an account-wide Glue catalog walk. Toolkit >= 3 reads only the
+        raw-free keys and must fail loudly when they are missing.
+
+    Inputs:  an SSM tree seeded WITHOUT the medallion keys — exactly what a
+             pipeline deployment older than v2.0.0 presents to toolkit >= 3.
+    Expected: `config dbt-env` and `release write` both exit 1 with a
+              ConfigError naming the missing SSM key and pointing at the
+              pipeline upgrade (>= v2.0.0); no partial exports, no s3://None,
+              and the release writer is never invoked.
+    """
+    ssm = boto3.client("ssm", region_name=REGION)
+    leaves = {  # everything _seed publishes EXCEPT the medallion keys
+        "meta/region": REGION,
+        "buckets/metadata": f"etl-test-metadata-{ACCOUNT}-{REGION}",
+        "release/db": "etl_test_dataops_metadata_db",
+        "release/table": "releases",
+        "athena/workgroup": "etl-test",
+        "athena/outputLocation": f"s3://etl-test-athena-results-{ACCOUNT}-{REGION}/",
+    }
+    for rel, value in leaves.items():
+        ssm.put_parameter(Name=f"/etl/test/{rel}", Value=value, Type="String")
+
+    result = runner.invoke(app, ["config", "dbt-env", "--env", "test"])
+    assert result.exit_code == 1
+    assert "/etl/test/glue/db/silver is missing" in result.output
+    assert "v2.0.0" in result.output
+    assert "export" not in result.output  # all-or-nothing: no partial env
+    assert "s3://None" not in result.output
+
+    result = runner.invoke(
+        app,
+        ["release", "write", "--env", "test", "--data-release-version", "1.0.0"],
+    )
+    assert result.exit_code == 1
+    assert "/etl/test/glue/db/silver is missing" in result.output
+    assert "v2.0.0" in result.output
+    mock_run.assert_not_called()
 
 
 def test_release_writer_run_aggregates_model_failures():
@@ -267,7 +317,7 @@ def test_release_writer_run_aggregates_model_failures():
     with patch.object(rw, "get_model_names", return_value=["silver_a", "silver_bad", "silver_b"]), \
          patch.object(rw, "insert_release_row", side_effect=fake_insert), \
          patch.object(rw.AthenaQuery, "create_release_table", MagicMock()), \
-         patch.object(rw.AthenaQuery, "find_db_for_model", lambda self, m, databases=None: "etl_test_raw_silver_db"), \
+         patch.object(rw.AthenaQuery, "find_db_for_model", lambda self, m, databases=None: "etl_test_silver_db"), \
          patch.object(rw.AthenaValidationWriter, "_get_latest_snapshot_id", fake_snapshot):
         with pytest.raises(RuntimeError, match="silver_bad"):
             rw.run(
