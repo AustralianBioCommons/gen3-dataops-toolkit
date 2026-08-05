@@ -142,6 +142,46 @@ Synthetic data is only schema-valid against the dictionary that generated it, so
 refuses a batch that doesn't match the version being uploaded (override with
 `--allow-version-mismatch`).
 
+## Verifying download access (check-download)
+
+Registration alone does not prove a file can be downloaded. Two failure modes
+are invisible until a user clicks the file in the portal: an Indexd record
+with no storage URL (nothing to download, ever), and a record Fence refuses
+to sign a URL for. `g3dt indexd check-download` walks the exact chain the
+portal hits — Indexd record → storage URL → DRS object → access methods →
+Fence signed URL — and reports PASS/FAIL per object, exiting non-zero if any
+object fails so it can gate a deployment step.
+
+Run it before a release, and after registering new files. The env selects the
+API key secret and the key's JWT selects the commons, so there is no URL to
+pass (and none to get wrong).
+
+```bash
+g3dt indexd check-download --env staging                    # sample the 25 newest
+g3dt indexd check-download --env staging --limit 50
+g3dt indexd check-download --env prod PREFIX/<uuid-1> PREFIX/<uuid-2>
+```
+
+With no GUIDs, the newest objects for the env's commons are sampled from the
+indexd registry (latest revision per baseid). The registry may live in a
+different AWS account than the commons being checked; if the env's AWS
+profile cannot reach it, pass GUIDs explicitly.
+
+Reading a failure:
+
+| Symptom | Meaning |
+|---|---|
+| `Indexd status: 404` | the object is not registered — a registration problem, not a download one |
+| `urls: []` / no access methods | registered but with no storage location; it can never download |
+| `Access endpoint … 401` | authorization: the API key's user lacks `read-storage` on the record's `authz` resource — an authz gap, not a broken key |
+| `Access endpoint … 500` | Fence has the permission but failed to sign — a service-side fault |
+
+On a 401, compare what the record requires
+(`https://commons.example.org/index/<did>`, the `authz` field) with what the
+key's user actually holds (`https://commons.example.org/user/user`):
+downloads require `read-storage` on the record's authz resource, which a user
+holding only `create` does not have.
+
 ## Development
 
 ```bash

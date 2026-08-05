@@ -13,7 +13,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from g3dt.cli.main import app
-from g3dt.config import EnvConfig, StudyConfig, dictionary_url
+from g3dt.config import ConfigError, EnvConfig, StudyConfig, dictionary_url
 
 runner = CliRunner()
 
@@ -378,3 +378,74 @@ def test_k8s_restart_schema_passes_env_argo_args(mock_run, _env):
     assert argv[0] == "bash"
     assert argv[1].endswith("services/k8s_ops/argocd_restart_schema.sh")
     assert "-d" in argv and "-a" in argv and "-n" in argv
+
+
+@patch("g3dt.config.resolve_env", side_effect=ConfigError("No SSM parameters found under /etl/nope"))
+@patch("g3dt.cli._internal.runner.run")
+def test_indexd_check_download_validates_env_before_spawning(mock_run, _resolve):
+    """
+    Background:
+        check-download resolves the env locally (env_of) before it spawns the
+        worker script, so an unknown env fails right here with the config
+        error — not seconds later, deep inside a subprocess whose traceback
+        buries the real problem.
+
+    Inputs:  g3dt indexd check-download --env nope, where env resolution
+             raises ConfigError
+    Expected Output: a clean non-zero exit carrying the config message; the
+    worker subprocess is never invoked.
+    """
+    result = runner.invoke(app, ["indexd", "check-download", "--env", "nope"])
+    assert result.exit_code == 1
+    mock_run.assert_not_called()
+    assert "No SSM parameters found" in result.output
+
+
+@patch("g3dt.cli.indexd_cmds.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_indexd_check_download_forwards_guids_in_order(mock_run, _env):
+    """
+    Background:
+        Explicit GUIDs must bypass registry sampling entirely (they need no
+        Athena access — e.g. spot-checking an object that just failed in the
+        portal), so --limit is NOT forwarded alongside them.
+
+    Inputs:  g3dt indexd check-download --env staging PREFIX/aaa PREFIX/bbb
+    Expected Output:
+      - exit code 0
+      - runs verify_file_access.py via the current interpreter with the env
+        and both GUIDs as trailing positionals, in the order given, and no
+        --limit flag
+    """
+    result = runner.invoke(
+        app,
+        ["indexd", "check-download", "--env", "staging",
+         "PREFIX/aaa", "PREFIX/bbb"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[0] == sys.executable
+    assert argv[1].endswith("services/indexd/verify_file_access.py")
+    assert argv[2:] == ["--env", "staging", "PREFIX/aaa", "PREFIX/bbb"]
+    assert "--limit" not in argv
+
+
+@patch("g3dt.cli.indexd_cmds.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_indexd_check_download_samples_registry_with_limit(mock_run, _env):
+    """
+    Background:
+        With no GUIDs given, the wrapped script samples the newest registered
+        objects for the env's commons from the indexd registry, so the
+        default pre-flight is a single command with no copy-paste. The CLI's
+        --limit controls the sample size (default 25).
+
+    Inputs:  g3dt indexd check-download --env staging --limit 5   (no GUIDs)
+    Expected Output: --limit 5 forwarded and NO trailing GUID positionals,
+    which tells the script to sample the registry itself.
+    """
+    result = runner.invoke(
+        app, ["indexd", "check-download", "--env", "staging", "--limit", "5"]
+    )
+    assert result.exit_code == 0, result.output
+    assert _argv(mock_run)[2:] == ["--env", "staging", "--limit", "5"]
