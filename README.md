@@ -79,13 +79,13 @@ structurally impossible.
 
 **Only the dbt template's `ci` target is prefixed.** `g3dt config dbt-env`
 emits, alongside the real names, the CI-isolation variants the template's
-`ci` target consumes: `G3DT_DB_BRONZE_CI` / `G3DT_DB_SILVER_CI` /
-`G3DT_DB_GOLD_CI` (`ci_` + the real database name) and
-`G3DT_S3_BRONZE_DATA_DIR_CI` / `G3DT_S3_SILVER_DATA_DIR_CI` /
-`G3DT_S3_GOLD_DATA_DIR_CI` (`dbt_ci/` under the same buckets). Bronze can be
-dbt-managed from gen3-dbt-template's synthetic-data revision onwards; a
-pipeline deployment >= v2.1.0 provides the matching `ci_..._bronze_db` Glue
-database. Toolkit
+`ci` target consumes: `G3DT_DB_SILVER_CI` / `G3DT_DB_GOLD_CI`
+(`ci_` + the real database name) and `G3DT_S3_SILVER_DATA_DIR_CI` /
+`G3DT_S3_GOLD_DATA_DIR_CI` (`dbt_ci/` under the same buckets). Bronze is
+ingest-only — dbt never writes it, and the template's synthetic demo data
+generates at silver — so bronze gets only `G3DT_DB_BRONZE` (real-ingest
+deployments resolve their sources.yml schema from it); pairs with an
+aws-gen3-pipeline deployment >= v2.2.0. Toolkit
 releases >= 3 read the raw-free medallion SSM keys and therefore require a
 pipeline deployment >= v2.0.0, which publishes them. Commit-
 triggered CI builds land there; every other target (default, local) and the
