@@ -52,7 +52,6 @@ def _seed(project="etl", env="test"):
         "buckets/metadata": f"{project}-{env}-metadata-{ACCOUNT}-{REGION}",
         "buckets/silver": f"{project}-{env}-silver-{ACCOUNT}-{REGION}",
         "buckets/gold": f"{project}-{env}-gold-{ACCOUNT}-{REGION}",
-        "buckets/bronze": f"{project}-{env}-bronze-{ACCOUNT}-{REGION}",
         "glue/db/bronze": f"{project}_{env}_bronze_db",
         "glue/db/silver": f"{project}_{env}_silver_db",
         "glue/db/gold": f"{project}_{env}_gold_db",
@@ -162,8 +161,10 @@ def test_config_dbt_env_emits_every_dbt_setting():
     """
     Inputs:  g3dt config dbt-env --env test
     Expected Output: shell-evaluable `export` lines carrying the workgroup,
-    Athena output, region, bronze/silver/gold DBs and the bronze/silver/gold
+    Athena output, region, bronze/silver/gold DBs and the silver/gold
     s3_data_dir values — the full env_var() contract of the dbt template.
+    Bronze is ingest-only, so it gets a database name (for sources.yml
+    schema resolution) but no dbt write-path data dir.
     """
     _seed()
     result = runner.invoke(app, ["config", "dbt-env", "--env", "test"])
@@ -175,9 +176,10 @@ def test_config_dbt_env_emits_every_dbt_setting():
     assert "export G3DT_DB_BRONZE=etl_test_bronze_db" in out
     assert "export G3DT_DB_SILVER=etl_test_silver_db" in out
     assert "export G3DT_DB_GOLD=etl_test_gold_db" in out
-    assert f"export G3DT_S3_BRONZE_DATA_DIR=s3://etl-test-bronze-{ACCOUNT}-{REGION}/dbt/" in out
     assert f"export G3DT_S3_SILVER_DATA_DIR=s3://etl-test-silver-{ACCOUNT}-{REGION}/dbt/" in out
     assert f"export G3DT_S3_GOLD_DATA_DIR=s3://etl-test-gold-{ACCOUNT}-{REGION}/dbt/" in out
+    # bronze is ingest-only: no dbt write path for it
+    assert "G3DT_S3_BRONZE_DATA_DIR" not in out
     # no profile configured -> ambient credentials and the default dbt target
     assert "G3DT_AWS_PROFILE" not in out
     assert "G3DT_DBT_TARGET" not in out
@@ -230,12 +232,13 @@ def test_config_dbt_env_emits_ci_isolation_vars():
     result = runner.invoke(app, ["config", "dbt-env", "--env", "test"])
     assert result.exit_code == 0, result.output
     out = result.output
-    assert "export G3DT_DB_BRONZE_CI=ci_etl_test_bronze_db" in out
     assert "export G3DT_DB_SILVER_CI=ci_etl_test_silver_db" in out
     assert "export G3DT_DB_GOLD_CI=ci_etl_test_gold_db" in out
-    assert f"export G3DT_S3_BRONZE_DATA_DIR_CI=s3://etl-test-bronze-{ACCOUNT}-{REGION}/dbt_ci/" in out
     assert f"export G3DT_S3_SILVER_DATA_DIR_CI=s3://etl-test-silver-{ACCOUNT}-{REGION}/dbt_ci/" in out
     assert f"export G3DT_S3_GOLD_DATA_DIR_CI=s3://etl-test-gold-{ACCOUNT}-{REGION}/dbt_ci/" in out
+    # bronze is ingest-only: no CI variants, only the real database name
+    assert "G3DT_DB_BRONZE_CI" not in out
+    assert "G3DT_S3_BRONZE_DATA_DIR_CI" not in out
     # the real names remain unprefixed
     assert "export G3DT_DB_BRONZE=etl_test_bronze_db" in out
     assert "export G3DT_DB_SILVER=etl_test_silver_db" in out
