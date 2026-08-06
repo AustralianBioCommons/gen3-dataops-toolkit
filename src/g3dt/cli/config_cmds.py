@@ -233,6 +233,7 @@ def dbt_env(
         gold_db = _req_key(rc, "glue/db/gold")
         silver_bucket = _req_key(rc, "buckets/silver")
         gold_bucket = _req_key(rc, "buckets/gold")
+        bronze_bucket = _req_key(rc, "buckets/bronze")
         bronze_db = _req_key(rc, "glue/db/bronze")
     except config.ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -245,13 +246,16 @@ def dbt_env(
         "G3DT_DB_BRONZE": bronze_db,
         "G3DT_DB_SILVER": silver_db,
         "G3DT_DB_GOLD": gold_db,
+        "G3DT_S3_BRONZE_DATA_DIR": f"s3://{bronze_bucket}/dbt/",
         "G3DT_S3_SILVER_DATA_DIR": f"s3://{silver_bucket}/dbt/",
         "G3DT_S3_GOLD_DATA_DIR": f"s3://{gold_bucket}/dbt/",
         # CI isolation: the dbt template's `ci` target builds into these
         # instead — same grammar as the CDK's ci_ databases, same buckets
         # under a dbt_ci/ prefix. Real names above are never prefixed.
+        "G3DT_DB_BRONZE_CI": f"ci_{bronze_db}",
         "G3DT_DB_SILVER_CI": f"ci_{silver_db}",
         "G3DT_DB_GOLD_CI": f"ci_{gold_db}",
+        "G3DT_S3_BRONZE_DATA_DIR_CI": f"s3://{bronze_bucket}/dbt_ci/",
         "G3DT_S3_SILVER_DATA_DIR_CI": f"s3://{silver_bucket}/dbt_ci/",
         "G3DT_S3_GOLD_DATA_DIR_CI": f"s3://{gold_bucket}/dbt_ci/",
     }
