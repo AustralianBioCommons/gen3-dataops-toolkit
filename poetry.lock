@@ -1539,14 +1539,14 @@ typer = ">=0.12,<1.0"
 
 [[package]]
 name = "gen3-validator"
-version = "2.1.0"
+version = "2.2.0"
 description = "Comprehensive toolkit for resolving Gen3 JSON schemas, validating JSON metadata against schemas, and verifying linkage integrity between data nodes. Includes utilities for parsing Excel metadata templates, generating linkage configuration maps, orchestrating schema validation, and producing detailed validation reports and statistics"
 optional = false
 python-versions = ">=3.9.5"
 groups = ["main", "synth"]
 files = [
-    {file = "gen3_validator-2.1.0-py3-none-any.whl", hash = "sha256:a0211f5ed24465d44eceeb9dc554e5c366383abc07ec4d8ff7f566120b7f75db"},
-    {file = "gen3_validator-2.1.0.tar.gz", hash = "sha256:65915becbf98e8b38e1df1bfad3ffe45e932698cec1b47306d8d1c24b8c60993"},
+    {file = "gen3_validator-2.2.0-py3-none-any.whl", hash = "sha256:cb69124e9f1ae7e23fe46b115b72a9596fe74f8dbcb3dd8ec7c1662491968cb7"},
+    {file = "gen3_validator-2.2.0.tar.gz", hash = "sha256:7c29032e2e3a4ec753586203d7c69f5a3ac70a228f120ed2e90f7b02a291ea61"},
 ]
 
 [package.dependencies]
