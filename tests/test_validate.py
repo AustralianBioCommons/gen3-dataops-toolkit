@@ -517,6 +517,143 @@ def test_validate_pipeline_uses_injected_invariants(
     assert df.iloc[0]["schema_version"] == "v9.9.9"
 
 
+@patch(f"{MODULE_PATH}.write_iceberg_to_db")
+@patch(f"{MODULE_PATH}.write_df_to_s3")
+@patch(f"{MODULE_PATH}.gen3_validator.validate.validate_list_dict")
+@patch(f"{MODULE_PATH}.download_s3_files_to_temp_dir")
+@patch(f"{MODULE_PATH}.get_latest_validation_for_study")
+@patch(f"{MODULE_PATH}.create_metadata_table")
+@patch(f"{MODULE_PATH}.load_schema_from_s3_uri")
+@patch(f"{MODULE_PATH}.os.listdir")
+@patch("builtins.open", new_callable=mock_open, read_data='[{"id": "t", "type": "sample"}]')
+def test_validate_pipeline_writes_pass_marker_when_study_is_clean(
+    mock_file,
+    mock_listdir,
+    mock_load_schema,
+    mock_create_metadata,
+    mock_get_latest,
+    mock_download,
+    mock_validate_list_dict,
+    mock_write_df,
+    mock_write_iceberg,
+):
+    """A study with zero failures must still produce exactly one result row.
+
+    Background:
+        validate_object only emits rows for FAILURES, so a clean study returns
+        an empty list. pd.DataFrame([]) has no columns at all, so selecting the
+        eleven result columns raised KeyError — caught and re-raised as
+        RuntimeError("Validation failed."), the SAME message a genuinely dirty
+        study produces. The green path was unreachable: fixing your data made
+        the job fail in a way indistinguishable from not fixing it.
+
+        Writing a row also matters downstream. The validation gate grades
+        MAX(validation_id); a clean run that wrote nothing would leave the
+        previous failing run as the latest, so the gate could never go green.
+
+    Input:    a study whose validation produces no failure rows.
+    Expected: one PASS row, all eleven columns present, no exception.
+    """
+    mock_listdir.return_value = ["sample.json"]
+    mock_get_latest.return_value = (
+        pd.DataFrame({"s3_uri": ["s3://b/validation/x_sample.json"]}),
+        "20260817101221",
+    )
+    mock_download.return_value = ("/tmp/fake", ["/tmp/fake/sample.json"])
+    mock_validate_list_dict.return_value = []          # clean study
+    resolver_mock = MagicMock()
+    resolver_mock.schema_resolved = {"sample": {}}
+    resolver_mock.get_schema_version.return_value = "v1.3.0"
+
+    from g3dt.validate.validate import validate_pipeline, VALIDATION_RESULT_COLUMNS
+
+    df = validate_pipeline(
+        study_id="synth1",
+        schema_s3_uri="s3://bucket/schema.json",
+        validation_s3_uri="s3://bucket/validation/",
+        write_back_root="s3://bucket/validation/",
+        glue_database="db",
+        athena_s3_output="s3://bucket/athena/",
+        schema={"nodes": []},
+        resolver=resolver_mock,
+        metadata_table=pd.DataFrame({"study_id": ["synth1"], "validation_id": ["x"], "s3_uri": ["s3://b/v/x.json"]}),
+        write_iceberg=False,
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["validation_result"] == "PASS"
+    assert df.iloc[0]["study_id"] == "synth1"
+    assert df.iloc[0]["validation_id"] == "20260817101221"
+    assert list(df.columns) == VALIDATION_RESULT_COLUMNS
+    # 'index' is the only numeric column. If a PASS-only frame let it fall back
+    # to object/float, the first Iceberg write would fix the wrong column type
+    # for every later write into the same table.
+    assert str(df["index"].dtype) == "Int64"
+
+
+@patch(f"{MODULE_PATH}.write_iceberg_to_db")
+@patch(f"{MODULE_PATH}.write_df_to_s3")
+@patch(f"{MODULE_PATH}.gen3_validator.validate.validate_list_dict")
+@patch(f"{MODULE_PATH}.download_s3_files_to_temp_dir")
+@patch(f"{MODULE_PATH}.get_latest_validation_for_study")
+@patch(f"{MODULE_PATH}.create_metadata_table")
+@patch(f"{MODULE_PATH}.load_schema_from_s3_uri")
+@patch(f"{MODULE_PATH}.os.listdir")
+@patch("builtins.open", new_callable=mock_open, read_data='[{"id": "t", "type": "case"}]')
+def test_validate_pipeline_writes_to_the_requested_results_table(
+    mock_file,
+    mock_listdir,
+    mock_load_schema,
+    mock_create_metadata,
+    mock_get_latest,
+    mock_download,
+    mock_validate_list_dict,
+    mock_write_df,
+    mock_write_iceberg,
+):
+    """The Iceberg write must honour results_table, not a hardcoded name.
+
+    CI validates the ci_* warehouse and must write ci_full_validation_results.
+    The table name was previously hardcoded here, so any caller that enabled
+    the per-study write would silently pollute the real results table with CI
+    findings — and the gate, which grades MAX(validation_id), would then let a
+    CI run decide whether a release was clean.
+    """
+    mock_listdir.return_value = ["case.json"]
+    mock_get_latest.return_value = (
+        pd.DataFrame({"s3_uri": ["s3://b/ci_validation/x_case.json"]}),
+        "20260817101221",
+    )
+    mock_download.return_value = ("/tmp/fake", ["/tmp/fake/case.json"])
+    mock_validate_list_dict.return_value = [{
+        "index": 0, "node": "case", "validation_result": "ERROR",
+        "invalid_key": None, "schema_path": None, "validator": None,
+        "validator_value": None,
+        "validation_error": "node 'case' not found in resolved schema",
+    }]
+    resolver_mock = MagicMock()
+    resolver_mock.schema_resolved = {"subject": {}}
+    resolver_mock.get_schema_version.return_value = "v1.3.0"
+
+    from g3dt.validate.validate import validate_pipeline
+
+    validate_pipeline(
+        study_id="synth1",
+        schema_s3_uri="s3://bucket/schema.json",
+        validation_s3_uri="s3://bucket/ci_validation/",
+        write_back_root="s3://bucket/ci_validation/",
+        glue_database="db",
+        athena_s3_output="s3://bucket/athena/",
+        schema={"nodes": []},
+        resolver=resolver_mock,
+        metadata_table=pd.DataFrame({"study_id": ["synth1"], "validation_id": ["x"], "s3_uri": ["s3://b/v/x.json"]}),
+        write_iceberg=True,
+        results_table="ci_full_validation_results",
+    )
+
+    assert mock_write_iceberg.call_args[1]["table"] == "ci_full_validation_results"
+
+
 def test_validate_pipeline_rejects_schema_without_resolver():
     """
     Test the schema/resolver pairing guard.
@@ -577,4 +714,60 @@ def test_run_validation_gate_builds_expected_query(mock_query_cls):
     assert "'%Additional properties are not%'" in sql
     assert "'%''programs'' is a required property%'" in sql
     assert "study_id NOT LIKE '%synthetic%'" in sql
+    # PASS markers are bookkeeping, not findings. A clean run writes one so the
+    # gate has something to grade at MAX(validation_id); counting it as a
+    # failure would make every clean run red.
+    assert "validation_result <> 'PASS'" in sql
     assert out is result_df
+
+
+@patch("g3dt.utils.athena_utils.AthenaQuery")
+def test_run_validation_gate_does_not_exclude_error_rows(mock_query_cls):
+    """ERROR rows must hold the gate closed.
+
+    An ERROR row means a record could not be validated at all — typically its
+    'type' names a node the dictionary does not define. That is strictly worse
+    than a known schema violation, because nothing about the record was
+    checked. Only PASS is filtered out; anything else the run recorded counts.
+
+    Without this, a warehouse whose nodes are all misnamed would validate
+    "clean" and be cleared for release.
+    """
+    from g3dt.validate.validate import run_validation_gate
+
+    mock_query = MagicMock()
+    mock_query.query_athena.return_value = pd.DataFrame()
+    mock_query_cls.return_value = mock_query
+
+    run_validation_gate(
+        "proj_test_validation_db", "s3://bucket/athena/",
+        aws_region="ap-southeast-2", workgroup="proj-test",
+    )
+
+    sql = mock_query.query_athena.call_args.kwargs["sql"]
+    assert "'ERROR'" not in sql
+
+
+@patch("g3dt.utils.athena_utils.AthenaQuery")
+def test_run_validation_gate_targets_the_requested_results_table(mock_query_cls):
+    """The gate must grade the table it was pointed at, not a hardcoded name.
+
+    CI validates ci_full_validation_results and the real warehouse validates
+    full_validation_results. The gate takes MAX(validation_id), so grading the
+    wrong table would let a CI run decide whether a release is clean.
+    """
+    from g3dt.validate.validate import run_validation_gate
+
+    mock_query = MagicMock()
+    mock_query.query_athena.return_value = pd.DataFrame()
+    mock_query_cls.return_value = mock_query
+
+    run_validation_gate(
+        "proj_test_validation_db", "s3://bucket/athena/",
+        aws_region="ap-southeast-2", workgroup="proj-test",
+        results_table="ci_full_validation_results",
+    )
+
+    sql = mock_query.query_athena.call_args.kwargs["sql"]
+    assert '"proj_test_validation_db"."ci_full_validation_results"' in sql
+    assert '"proj_test_validation_db"."full_validation_results"' not in sql
