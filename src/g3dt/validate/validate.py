@@ -479,6 +479,49 @@ def truncate_linkage_results(linkage_results_dict: dict) -> dict:
     return linkage_results_dict
 
 
+#: The eight fields every result row carries, as emitted by
+#: ``gen3_validator.validate.validate_object`` (FAIL rows) and
+#: ``gen3_validator.validate.error_record`` (ERROR rows).
+VALIDATION_RESULT_BASE_COLUMNS = [
+    "node",
+    "index",
+    "validation_result",
+    "invalid_key",
+    "schema_path",
+    "validator",
+    "validator_value",
+    "validation_error",
+]
+
+#: Full column contract of the results table, in write order.
+VALIDATION_RESULT_COLUMNS = [
+    "validation_id",
+    "index",
+    "node",
+    "study_id",
+    "validation_result",
+    "invalid_key",
+    "schema_path",
+    "validator",
+    "validator_value",
+    "validation_error",
+    "schema_version",
+]
+
+#: Written when a study validates clean, so that every run leaves exactly one
+#: gradeable row. Excluded by the validation gate — see
+#: :func:`run_validation_gate`.
+PASS_MARKER_ROW = {
+    "node": None,
+    "index": None,
+    "validation_result": "PASS",
+    "invalid_key": None,
+    "schema_path": None,
+    "validator": None,
+    "validator_value": None,
+    "validation_error": None,
+}
+
 #: validation_error patterns treated as known noise by the validation gate —
 #: structural artefacts of the export (null-typed fields, extra export-side
 #: properties, the Gen3 'programs' root requirement), not data quality issues.
@@ -497,9 +540,14 @@ def run_validation_gate(glue_database: str, athena_s3_output: str,
 
     The gate looks at the most recent ``validation_id`` in the results table,
     filters out the known-noise error patterns
-    (:data:`VALIDATION_GATE_IGNORED_ERRORS`) and synthetic studies, and
-    aggregates what remains. An empty result means the latest validation run
-    is clean; any rows are genuine schema failures an operator must fix.
+    (:data:`VALIDATION_GATE_IGNORED_ERRORS`), PASS markers and synthetic
+    studies, and aggregates what remains. An empty result means the latest
+    validation run is clean; any rows are genuine schema failures an operator
+    must fix.
+
+    ERROR rows are deliberately NOT filtered out. A record whose node is absent
+    from the dictionary could not be checked at all, which is a failure to
+    validate rather than a clean result, and must hold the gate closed.
 
     Callers (the validator Glue job) FAIL the run when rows come back, so the
     validation Step Function goes red until the data is fixed and validation
@@ -523,6 +571,7 @@ WHERE validation_id = (
     FROM "{glue_database}"."{results_table}"
 )
 {ignore_clauses}
+  AND validation_result <> 'PASS'
   AND study_id NOT LIKE '%synthetic%'
 GROUP BY node, study_id, invalid_key, validator_value, validation_error
 ORDER BY node, study_id
@@ -567,6 +616,7 @@ def validate_pipeline(
     resolver=None,
     metadata_table: pd.DataFrame = None,
     write_iceberg: bool = True,
+    results_table: str = "full_validation_results",
 ) -> pd.DataFrame:
     """
     Orchestrate the validation workflow for a study: load + resolve schema, find the latest
@@ -592,9 +642,14 @@ def validate_pipeline(
         write_iceberg: When False, skip the per-study Iceberg write and leave it
             to the caller (who can concatenate several studies' results into a
             single write). The CSV write-back always happens.
+        results_table: Table to write into when ``write_iceberg`` is True. Callers
+            validating an isolated warehouse (e.g. the CI databases) MUST pass
+            their own — the real and CI results must never share a table, since
+            the gate grades whichever run has the greatest validation_id.
 
     Returns:
-        The study's validation results DataFrame.
+        The study's validation results DataFrame. Never empty: a study with no
+        failures yields a single PASS marker row.
 
     Raises:
         RuntimeError: When expected inputs are missing or a pipeline step fails.
@@ -663,24 +718,34 @@ def validate_pipeline(
         logger.info("Getting Schema Version")
         schema_version = resolver.get_schema_version(schema = schema)
         
-        full_validation_results_df = pd.DataFrame(results)
+        if not results:
+            # No failures. Record the run anyway: the validation gate grades
+            # the greatest validation_id in the results table, so a clean run
+            # that writes nothing would leave the previous FAILING run as the
+            # latest and the gate could never go green no matter how many
+            # times the data was fixed. A PASS marker also guarantees the
+            # table exists after the first run, which is what stops a fresh
+            # environment reporting TABLE_NOT_FOUND.
+            logger.info("No validation failures for study '%s'; writing PASS marker.", study_id)
+            results = [PASS_MARKER_ROW.copy()]
+
+        # Build with an explicit column list rather than inferring it from the
+        # rows: pd.DataFrame([]) has NO columns, so the reindex below used to
+        # raise KeyError and surface as "Validation failed." — a clean study
+        # failing with the same message as a dirty one.
+        full_validation_results_df = pd.DataFrame(results, columns=VALIDATION_RESULT_BASE_COLUMNS)
         full_validation_results_df["validation_id"] = latest_validation_id
         full_validation_results_df["study_id"] = study_id
         full_validation_results_df["schema_version"] = schema_version
-        
-        full_validation_results_df = full_validation_results_df[[
-            "validation_id",
-            "index",
-            "node",
-            "study_id",
-            "validation_result",
-            "invalid_key",
-            "schema_path",
-            "validator",
-            "validator_value",
-            "validation_error",
-            "schema_version"
-        ]]
+
+        full_validation_results_df = full_validation_results_df[VALIDATION_RESULT_COLUMNS]
+
+        # 'index' is the only numeric column. A PASS-only frame leaves it
+        # entirely null, which would infer a different Iceberg column type
+        # than a frame containing failures — and full_validation_results
+        # already exists in deployed environments. Pin it so both shapes
+        # write the same schema.
+        full_validation_results_df = full_validation_results_df.astype({"index": "Int64"})
 
         logger.info("Validation completed (%s rows).", len(full_validation_results_df))
     except Exception as e:
@@ -703,12 +768,12 @@ def validate_pipeline(
             logger.info(
                 "Writing Parquet to Glue DB '%s', table '%s'.",
                 glue_database,
-                "full_validation_results",
+                results_table,
             )
             write_iceberg_to_db(
                 df=full_validation_results_df,
                 database=glue_database,
-                table="full_validation_results",
+                table=results_table,
                 athena_s3_output=athena_s3_output,
                 workgroup=workgroup,
             )
