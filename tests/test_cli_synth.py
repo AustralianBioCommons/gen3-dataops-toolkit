@@ -22,8 +22,20 @@ from g3dt.config import EnvConfig
 runner = CliRunner()
 
 
-def _env_cfg(name: str) -> EnvConfig:
-    """A fully-populated EnvConfig as resolve_env would return it."""
+@pytest.fixture(autouse=True)
+def _isolated_marker(tmp_path, monkeypatch):
+    """Keep tests hermetic: the LLM key-file fallback reads the marker, and a
+    developer's real ~/.g3dt/g3dt.yaml (with llm_api_key_file set) would
+    otherwise leak into the asserted subprocess env."""
+    monkeypatch.setenv("G3DT_MARKER", str(tmp_path / "no-marker.yaml"))
+
+
+def _env_cfg(name: str, llm_model: str = "ssm-model") -> EnvConfig:
+    """A fully-populated EnvConfig as resolve_env would return it.
+
+    Carries an llm_model by default (as an env deployed with the CDK's llm
+    block would); pass llm_model=None to model a deployment without the block.
+    """
     return EnvConfig(
         name=name,
         is_ec2=name.endswith("_ec2"),
@@ -37,6 +49,7 @@ def _env_cfg(name: str) -> EnvConfig:
         namespace="n",
         cluster_name="c",
         schema_repo="Org/schema-repo",
+        llm_model=llm_model,
     )
 
 
@@ -86,12 +99,82 @@ def test_generate_passes_study_and_defaults_to_random(mock_run, _env, schema_dir
 def test_generate_llm_flag_enables_llm(mock_run, _env, schema_dir):
     """
     Inputs:  g3dt synth generate AusDiab_Simulated --llm
-    Expected Output: --provider llm is passed (opt-in; reads LLM config from .env).
+    Expected Output: --provider llm is passed, and the env's SSM-resolved
+    model reaches the script as G3DT_LLM_MODEL (the script forwards it to the
+    simulator as a flag) — no local .env involved.
     """
     result = runner.invoke(app, ["synth", "generate", "AusDiab_Simulated", "--llm"])
     assert result.exit_code == 0, result.output
     argv = _gen_argv(mock_run)
     assert argv[argv.index("--provider") + 1] == "llm"
+    env = _gen_env(mock_run)
+    assert env["G3DT_LLM_MODEL"] == "ssm-model"
+    assert env["G3DT_LLM_PROVIDER"] == "anthropic"
+
+
+def _gen_env(mock_run):
+    """Return the env dict of the generate_synth_metadata.sh invocation."""
+    for call in mock_run.call_args_list:
+        argv = list(call.args[0])
+        if any(str(a).endswith("generate_synth_metadata.sh") for a in argv):
+            return call.kwargs["env"]
+    raise AssertionError(f"generate script not invoked: {mock_run.call_args_list}")
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_generate_llm_flags_override_ssm(mock_run, _env, schema_dir, tmp_path):
+    """
+    Inputs:  --llm --llm-provider openai --llm-model my-model
+             --llm-api-key-file <existing file>
+    Expected Output: the flag values win over the EnvConfig's SSM-resolved
+    ones and the key path is exported as LLM_API_KEY_FILE. This is the
+    "try a model with one command, no redeploy" path.
+    """
+    key_file = tmp_path / "key"
+    key_file.write_text("sk-test")
+    result = runner.invoke(
+        app,
+        ["synth", "generate", "AusDiab_Simulated", "--llm",
+         "--llm-provider", "openai", "--llm-model", "my-model",
+         "--llm-api-key-file", str(key_file)],
+    )
+    assert result.exit_code == 0, result.output
+    env = _gen_env(mock_run)
+    assert env["G3DT_LLM_PROVIDER"] == "openai"
+    assert env["G3DT_LLM_MODEL"] == "my-model"
+    assert env["LLM_API_KEY_FILE"] == str(key_file)
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=lambda name: _env_cfg(name, llm_model=None))
+@patch("g3dt.cli._internal.runner.run")
+def test_generate_llm_without_model_exits_with_guidance(mock_run, _env, schema_dir):
+    """
+    Inputs:  --llm against an env whose deployment has no llm block (no SSM
+             model) and with no --llm-model flag
+    Expected Output: exit 1 BEFORE the script runs, with a message pointing at
+    both fixes (add the llm block to the CDK config, or pass --llm-model) —
+    instead of the simulator failing later with its own .env-era error.
+    """
+    result = runner.invoke(app, ["synth", "generate", "AusDiab_Simulated", "--llm"])
+    assert result.exit_code == 1
+    assert "No LLM model configured" in result.output
+    assert "--llm-model" in result.output
+    assert not mock_run.called
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_generate_random_provider_skips_llm_plumbing(mock_run, _env, schema_dir):
+    """
+    Inputs:  a plain random-provider generate (the default)
+    Expected Output: no LLM_API_KEY_FILE is injected — the keyless path stays
+    keyless, and a missing model in the deployment can never affect it.
+    """
+    result = runner.invoke(app, ["synth", "generate", "AusDiab_Simulated"])
+    assert result.exit_code == 0, result.output
+    env = _gen_env(mock_run)
+    assert "LLM_API_KEY_FILE" not in env
 
 
 @patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)

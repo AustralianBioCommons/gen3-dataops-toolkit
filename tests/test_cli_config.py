@@ -282,3 +282,77 @@ def test_dictionary_source_treats_empty_parameter_as_unset():
 
     e = config.resolve_env("test")
     assert config.dictionary_url(e).startswith("https://raw.githubusercontent.com/")
+
+
+@mock_aws
+def test_llm_facts_resolved_from_optional_app_inputs():
+    """
+    Inputs:  an env tree with app/llm_provider and app/llm_model set (what the
+             CDK's optional llm config block publishes)
+    Expected: EnvConfig carries both, so `g3dt synth --llm` uses the
+             deployment's values and operators share one model with no local
+             configuration beyond the API key path.
+    """
+    _seed_env("etl", "test")
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(Name="/etl/test/app/llm_provider", Value="openai", Type="String")
+    ssm.put_parameter(Name="/etl/test/app/llm_model", Value="some-model", Type="String")
+
+    e = config.resolve_env("test")
+    assert e.llm_provider == "openai"
+    assert e.llm_model == "some-model"
+
+
+@mock_aws
+def test_llm_facts_default_when_absent():
+    """
+    Inputs:  an env tree WITHOUT app/llm_* (a deployment whose config has no
+             llm block — including every environment deployed before v3.1.0)
+    Expected: provider falls back to DEFAULT_LLM_PROVIDER and the model is
+             None. Crucially these keys are NOT in REQUIRED_APP_KEYS, whose
+             gate raises a "re-run cdk deploy" error — requiring them would
+             break every existing environment. The missing model only becomes
+             an error inside `synth --llm`, with guidance, when it is needed.
+    """
+    _seed_env("etl", "test")
+
+    e = config.resolve_env("test")
+    assert e.llm_provider == config.DEFAULT_LLM_PROVIDER
+    assert e.llm_model is None
+
+
+@mock_aws
+def test_llm_model_blank_parameter_treated_as_unset():
+    """
+    Inputs:  app/llm_model published as whitespace (SSM rejects truly empty
+             values, so a "blanked out" parameter arrives as spaces)
+    Expected: the model resolves to None, not to a whitespace model id that
+             would be passed to the simulator as a real flag value.
+    """
+    _seed_env("etl", "test")
+    boto3.client("ssm", region_name=REGION).put_parameter(
+        Name="/etl/test/app/llm_model", Value=" ", Type="String"
+    )
+
+    e = config.resolve_env("test")
+    assert e.llm_model is None
+
+
+def test_script_env_exports_llm_facts_only_when_model_set():
+    """
+    Inputs:  two hand-built EnvConfigs — one with a model, one without
+    Expected: G3DT_LLM_PROVIDER is always exported (it has a real default);
+             G3DT_LLM_MODEL is exported only when a model exists, so shell
+             scripts can distinguish "no model configured" from empty string.
+    """
+    base = dict(
+        name="test", is_ec2=False, region=REGION, dictionary_version="v1",
+        aws_profile=None, aws_secret_name="s", schema_s3_uri="u", domain="d",
+        app_name="a", namespace="n", cluster_name="c", schema_repo="Org/r",
+    )
+    with_model = config.script_env(config.EnvConfig(**base, llm_model="m1"))
+    assert with_model["G3DT_LLM_PROVIDER"] == config.DEFAULT_LLM_PROVIDER
+    assert with_model["G3DT_LLM_MODEL"] == "m1"
+
+    without_model = config.script_env(config.EnvConfig(**base))
+    assert "G3DT_LLM_MODEL" not in without_model

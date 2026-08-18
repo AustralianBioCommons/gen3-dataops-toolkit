@@ -50,11 +50,21 @@ DEFAULT_REGION = "ap-southeast-2"
 DEFAULT_DICT_BASE_URL = "https://raw.githubusercontent.com"
 DEFAULT_DICT_PATH = "dictionary/prod_dict/acdc_schema.json"
 
+#: Synthetic-data LLM facts, published by the CDK's OPTIONAL ``llm`` config
+#: block as ``app/llm_provider`` / ``app/llm_model`` and consumed by
+#: gen3-metadata-simulator through ``g3dt synth``. Optional app inputs:
+#: environments deployed without the block fall back to this provider default.
+#: The model deliberately has no default — ``g3dt synth`` errors with guidance
+#: when the ``--llm`` path is used and no model is configured anywhere.
+DEFAULT_LLM_PROVIDER = "anthropic"
+
 #: Marker locations, most specific first.
 MARKER_PATHS = ("g3dt.yaml", "~/.g3dt/g3dt.yaml", "/etc/g3dt/g3dt.yaml")
 
-#: Marker keys `g3dt config set` may write.
-SETTABLE_MARKER_KEYS = ("project", "region", "default_env")
+#: Marker keys `g3dt config set` may write. ``llm_api_key_file`` is the path
+#: to the file holding the synth LLM API key — the one LLM setting that stays
+#: local (the provider and model come from SSM; the key never leaves the box).
+SETTABLE_MARKER_KEYS = ("project", "region", "default_env", "llm_api_key_file")
 
 #: Gen3 app facts mirrored to SSM /{project}/{env}/app/* by the CDK.
 REQUIRED_APP_KEYS = (
@@ -150,6 +160,18 @@ def require_project(marker: Optional[dict] = None) -> str:
     return project
 
 
+def llm_api_key_file(marker: Optional[dict] = None) -> Optional[str]:
+    """Path to the file holding the synth LLM API key, from the marker.
+
+    Set once per operator with ``g3dt config set llm_api_key_file <path>``.
+    Returns ``None`` when unset — gen3-metadata-simulator then falls back to
+    the vendor's standard env var (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY``).
+    """
+    m = marker if marker is not None else load_marker()
+    value = m.get("llm_api_key_file")
+    return str(Path(str(value)).expanduser()) if value else None
+
+
 def set_marker_value(key: str, value: str) -> Tuple[Optional[str], str, Path]:
     """Set one bootstrap key in the user's marker file and write it back.
 
@@ -230,6 +252,11 @@ class EnvConfig:
     # hand-built EnvConfig still composes a valid URL.
     dictionary_base_url: str = DEFAULT_DICT_BASE_URL
     dictionary_path: str = DEFAULT_DICT_PATH
+    # Optional synthetic-data LLM inputs (SSM app/llm_provider, app/llm_model).
+    # The model has no default on purpose: synth's --llm path checks and errors
+    # with guidance rather than silently picking a model.
+    llm_provider: str = DEFAULT_LLM_PROVIDER
+    llm_model: Optional[str] = None
 
 
 def _app_or_default(rc, leaf: str, default: str) -> str:
@@ -289,6 +316,10 @@ def resolve_env(env: str, project: Optional[str] = None) -> EnvConfig:
             rc, "dictionary_base_url", DEFAULT_DICT_BASE_URL
         ),
         dictionary_path=_app_or_default(rc, "dictionary_path", DEFAULT_DICT_PATH),
+        # Same optional-app-fact contract: the CDK publishes these only when
+        # the config has an llm block, so absence means "use the defaults".
+        llm_provider=_app_or_default(rc, "llm_provider", DEFAULT_LLM_PROVIDER),
+        llm_model=(_app_or_default(rc, "llm_model", "") or None),
     )
 
 
@@ -395,6 +426,8 @@ def script_env(e: EnvConfig, version: Optional[str] = None) -> Dict[str, str]:
         "G3DT_NAMESPACE": e.namespace,
         "G3DT_CLUSTER_NAME": e.cluster_name,
         "G3DT_SCHEMA_REPO": e.schema_repo,
+        "G3DT_LLM_PROVIDER": e.llm_provider,
+        "G3DT_LLM_MODEL": e.llm_model,
     }
     env.update({k: v for k, v in values.items() if v is not None})
     return env

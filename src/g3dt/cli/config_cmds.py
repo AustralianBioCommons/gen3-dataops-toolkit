@@ -118,6 +118,11 @@ def show(
     typer.echo(f"  namespace          : {e.namespace}")
     typer.echo(f"  cluster_name       : {e.cluster_name}")
     typer.echo(f"  ec2_instance_id    : {e.ec2_instance_id}")
+    # Synthetic-data LLM facts: provider/model from SSM (the CDK's optional
+    # llm block); only the key *path* is local, from the marker.
+    typer.echo(f"  llm_provider       : {e.llm_provider}")
+    typer.echo(f"  llm_model          : {e.llm_model or '(not set — pass --llm-model or add the llm block to the CDK config)'}")
+    typer.echo(f"  llm_api_key_file   : {config.llm_api_key_file() or '(not set — g3dt config set llm_api_key_file <path>)'}")
     if study:
         s = study_of(study, env)
         typer.secho(f"Study: {study} -> {s.key}", bold=True)
@@ -198,6 +203,20 @@ def diff(
     for camel, leaf in camel_to_leaf.items():
         check(f"gen3.{camel}", gen3.get(camel), rc.get(f"app/{leaf}"))
     check("toolkitVersion", inputs.get("toolkitVersion"), rc.get("meta/toolkitVersion"))
+
+    # Optional inputs: compared only when the file defines them — an absent
+    # input legitimately publishes no SSM parameter (or, for the dictionary
+    # fields, predates their addition), so absence on both sides is not drift.
+    for camel, leaf in {
+        "dictionaryBaseUrl": "dictionary_base_url",
+        "dictionaryPath": "dictionary_path",
+    }.items():
+        if camel in gen3:
+            check(f"gen3.{camel}", gen3.get(camel), rc.get(f"app/{leaf}"))
+    llm = inputs.get("llm") or {}
+    for camel, leaf in {"provider": "llm_provider", "model": "llm_model"}.items():
+        if camel in llm:
+            check(f"llm.{camel}", llm.get(camel), rc.get(f"app/{leaf}"))
 
     if not drift:
         typer.secho(
