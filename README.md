@@ -148,6 +148,32 @@ Synthetic data is only schema-valid against the dictionary that generated it, so
 refuses a batch that doesn't match the version being uploaded (override with
 `--allow-version-mismatch`).
 
+### Synthetic data: LLM configuration
+
+`synth generate --llm` and `synth deploy` generate LLM-realistic values with
+[gen3-metadata-simulator](https://github.com/AustralianBioCommons/gen3-metadata-simulator).
+The provider and model resolve with precedence **CLI flags > SSM > default**:
+the CDK config's optional `llm` block publishes `app/llm_provider` /
+`app/llm_model` to SSM, so every operator gets the deployment's values, and
+`--llm-provider` / `--llm-model` override them for one run (e.g. to try a
+model before adding it to the CDK config). Environments deployed without the
+block fall back to provider `anthropic`, and the `--llm` path errors with
+guidance when no model is configured anywhere.
+
+Only the API key stays local — as a *path* to the file holding it, never the
+key itself, set once per operator:
+
+```bash
+g3dt config set llm_api_key_file ~/.g3dt/anthropic_api_key
+g3dt synth generate AusDiab_Simulated --llm -n 5 -e test
+```
+
+(or per run with `--llm-api-key-file`; the vendor env var `ANTHROPIC_API_KEY`
+/ `OPENAI_API_KEY` also works as a fallback.) The old `~/.g3dt/.env`
+(`LLM_PROVIDER`/`LLM_MODEL`/`LLM_API_KEY_FILE`) is **no longer read**.
+`g3dt config show --env <env>` prints the resolved provider, model, and key
+path.
+
 ## Verifying download access (check-download)
 
 Registration alone does not prove a file can be downloaded. Two failure modes

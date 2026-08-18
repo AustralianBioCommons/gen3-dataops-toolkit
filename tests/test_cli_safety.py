@@ -31,6 +31,9 @@ def _env_cfg(name: str) -> EnvConfig:
         namespace="n",
         cluster_name="c",
         schema_repo="Org/schema-repo",
+        # synth deploy is always LLM-backed and requires a model; model an env
+        # deployed with the CDK's llm block so the safety paths stay testable.
+        llm_model="ssm-model",
     )
 
 

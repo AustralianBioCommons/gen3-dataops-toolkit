@@ -8,13 +8,12 @@
 # The tool takes a LOCAL bundled Gen3 schema file (pulled by pull_dict.sh into
 # ~/.g3dt/schemas/acdc_schema_<version>.json, or $G3DT_SCHEMA_DIR if set). The
 # default provider is keyless 'random'; pass --provider llm for LLM-realistic
-# values, in which case LLM config is read from ~/.g3dt/.env (or $G3DT_ENV_FILE
-# if set): LLM_PROVIDER / LLM_MODEL / LLM_API_KEY_FILE.
+# values. The LLM vendor/model arrive as $G3DT_LLM_PROVIDER / $G3DT_LLM_MODEL
+# (resolved by g3dt: CLI flags > SSM app/llm_* > default) and are forwarded to
+# the simulator as flags; the API key file path arrives as $LLM_API_KEY_FILE.
+# The old ~/.g3dt/.env is no longer read.
 
 set -euo pipefail
-
-# LLM provider config file (lives outside the installed package).
-ENV_FILE="${G3DT_ENV_FILE:-$HOME/.g3dt/.env}"
 
 usage() {
     cat <<EOF
@@ -32,8 +31,8 @@ Options:
   --num-records N|n1,n2  Records per study: one number for all, or a comma list
                          (one per study). Default: ${DEFAULT_NUM_RECORDS}
   --provider random|llm  Value strategy. Default: ${DEFAULT_PROVIDER}
-                         'random' needs no key; 'llm' reads LLM config from
-                         ${ENV_FILE}.
+                         'random' needs no key; 'llm' uses \$G3DT_LLM_PROVIDER /
+                         \$G3DT_LLM_MODEL / \$LLM_API_KEY_FILE (set by g3dt).
   --seed N               RNG seed for reproducible output.
   --output-root DIR      Root output dir. Default: ${DEFAULT_OUTPUT_ROOT}
   -h, --help             Show this help and exit.
@@ -123,9 +122,16 @@ for i in "${!STUDY_ARRAY[@]}"; do
          --num-records "$N"
          --provider "$PROVIDER")
     [[ -n "$SEED" ]] && CMD+=(--seed "$SEED")
-    # Point the LLM provider at the user-level env file regardless of the caller's CWD.
-    if [[ "$PROVIDER" == "llm" && -f "${ENV_FILE}" ]]; then
-        CMD+=(--env-file "${ENV_FILE}")
+    if [[ "$PROVIDER" == "llm" ]]; then
+        # Vendor/model resolved by g3dt (flags > SSM > default) and forwarded
+        # as simulator flags, because the simulator's own precedence puts
+        # flags above any .env or environment variable.
+        [[ -n "${G3DT_LLM_PROVIDER:-}" ]] && CMD+=(--llm-provider "$G3DT_LLM_PROVIDER")
+        [[ -n "${G3DT_LLM_MODEL:-}" ]] && CMD+=(--llm-model "$G3DT_LLM_MODEL")
+        # Neutralize any .env in the caller's CWD: /dev/null exists (satisfies
+        # the simulator's exists=True check) and dotenv-parses to empty, so
+        # only the flags above and the inherited $LLM_API_KEY_FILE apply.
+        CMD+=(--env-file /dev/null)
     fi
     "${CMD[@]}"
 done

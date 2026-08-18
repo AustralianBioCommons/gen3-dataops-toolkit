@@ -9,9 +9,14 @@ Every command accepts ``--env``; targeting a **production** environment (any env
 whose name contains ``prod``) shows a warning and requires typing the env name to
 confirm — it cannot be bypassed.
 
-Generation defaults to keyless ``random`` data (no API calls). Pass ``--llm`` for
-LLM-realistic values, which needs an API key configured in a ``.env`` in the
-working directory (``LLM_PROVIDER`` / ``LLM_MODEL`` / ``LLM_API_KEY_FILE``).
+Generation defaults to keyless ``random`` data (no API calls). Pass ``--llm``
+for LLM-realistic values. The LLM provider and model come from the
+environment's SSM tree (the CDK config's optional ``llm`` block, published as
+``app/llm_provider`` / ``app/llm_model``) and can be overridden per run with
+``--llm-provider`` / ``--llm-model``. Only the API key stays local: point at
+its file once with ``g3dt config set llm_api_key_file <path>`` (or per run
+with ``--llm-api-key-file``); the vendor env var ``ANTHROPIC_API_KEY`` /
+``OPENAI_API_KEY`` also works. The old ``~/.g3dt/.env`` is no longer read.
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from typing import Optional
 
 import typer
 
+from g3dt import config
 from g3dt.config import (
     dictionary_filename,
     dictionary_url,
@@ -37,6 +43,45 @@ app = typer.Typer(
 )
 
 SYNTH_DIR = Path("~/.g3dt/synth_metadata").expanduser()
+
+
+def _llm_env_overrides(
+    e,
+    llm_provider: Optional[str],
+    llm_model: Optional[str],
+    llm_api_key_file: Optional[Path],
+) -> dict:
+    """Resolve the effective LLM settings for a run: flags > SSM > default.
+
+    Returns env-var overrides for the generator script, which forwards
+    provider/model to gen3-metadata-simulator as CLI flags (the simulator's
+    own precedence puts flags first). Exits with guidance when no model is
+    configured anywhere; the key-file path is optional — the simulator falls
+    back to the vendor env var and raises its own error if neither exists.
+    """
+    effective_provider = llm_provider or e.llm_provider
+    effective_model = llm_model or e.llm_model
+    if not effective_model:
+        typer.secho(
+            "No LLM model configured. Set the llm block in the CDK config "
+            "(published to SSM as app/llm_model) and redeploy, or pass "
+            "--llm-model for this run.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+    overrides = {
+        "G3DT_LLM_PROVIDER": effective_provider,
+        "G3DT_LLM_MODEL": effective_model,
+    }
+    key_file = (
+        str(Path(llm_api_key_file).expanduser())
+        if llm_api_key_file
+        else config.llm_api_key_file()
+    )
+    if key_file:
+        overrides["LLM_API_KEY_FILE"] = key_file
+    return overrides
 
 #: Written into each generated batch so `synth upload` can tell which dictionary
 #: produced it. A batch is only valid against that dictionary, and the directory
@@ -110,19 +155,35 @@ def deploy(
     env: str = typer.Option(
         "test", "--env", "-e", help="Target environment (prod requires typed confirmation)."
     ),
+    llm_provider: Optional[str] = typer.Option(
+        None, "--llm-provider",
+        help="LLM vendor override (anthropic|openai); default: the env's SSM app/llm_provider.",
+    ),
+    llm_model: Optional[str] = typer.Option(
+        None, "--llm-model",
+        help="LLM model override; default: the env's SSM app/llm_model.",
+    ),
+    llm_api_key_file: Optional[Path] = typer.Option(
+        None, "--llm-api-key-file", exists=True, dir_okay=False,
+        help="Path to the file holding the LLM API key; default: the marker's "
+        "llm_api_key_file (set once: g3dt config set llm_api_key_file <path>).",
+    ),
 ) -> None:
     """Full end-to-end synthetic deploy (dict + LLM-generate + upload + restarts).
 
     Wraps services/synthetic_data/full_deploy_dd_and_synth.sh (LLM-backed
-    generation). Requires an LLM key configured in .env.
+    generation). Provider/model come from the env's SSM tree unless
+    overridden; the API key path comes from --llm-api-key-file or the marker.
     """
     e = env_of(env)
     safety.confirm_prod_strict("synthetic full deploy", env)
+    env_vars = script_env(e)
+    env_vars.update(_llm_env_overrides(e, llm_provider, llm_model, llm_api_key_file))
     runner.run(
         runner.bash_script(
             "services/synthetic_data/full_deploy_dd_and_synth.sh", env
         ),
-        env=script_env(e),
+        env=env_vars,
     )
 
 
@@ -147,8 +208,22 @@ def generate(
     llm: bool = typer.Option(
         False,
         "--llm",
-        help="Generate LLM-realistic values; reads LLM config from a .env in the "
-        "working directory. Default is keyless random data (no API key, no API calls).",
+        help="Generate LLM-realistic values; provider/model resolve from the "
+        "env's SSM tree (override with --llm-provider/--llm-model). Default is "
+        "keyless random data (no API key, no API calls).",
+    ),
+    llm_provider: Optional[str] = typer.Option(
+        None, "--llm-provider",
+        help="LLM vendor override (anthropic|openai); default: the env's SSM app/llm_provider.",
+    ),
+    llm_model: Optional[str] = typer.Option(
+        None, "--llm-model",
+        help="LLM model override; default: the env's SSM app/llm_model.",
+    ),
+    llm_api_key_file: Optional[Path] = typer.Option(
+        None, "--llm-api-key-file", exists=True, dir_okay=False,
+        help="Path to the file holding the LLM API key; default: the marker's "
+        "llm_api_key_file (set once: g3dt config set llm_api_key_file <path>).",
     ),
     seed: int = typer.Option(None, "--seed", help="RNG seed for reproducible output."),
     schema: str = typer.Option(
@@ -227,11 +302,16 @@ def generate(
         args += ["--num-records", num_records]
     if seed is not None:
         args += ["--seed", str(seed)]
+    env_vars = script_env(e, ver)
+    if effective_provider == "llm":
+        env_vars.update(
+            _llm_env_overrides(e, llm_provider, llm_model, llm_api_key_file)
+        )
     runner.run(
         runner.bash_script(
             "services/synthetic_data/generate_synth_metadata.sh", *args
         ),
-        env=script_env(e, ver),
+        env=env_vars,
     )
     # Only after a successful generate: runner.run raises on failure, so a
     # half-written batch is never stamped as valid.
