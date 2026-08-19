@@ -123,6 +123,10 @@ def show(
     typer.echo(f"  llm_provider       : {e.llm_provider}")
     typer.echo(f"  llm_model          : {e.llm_model or '(not set — pass --llm-model or add the llm block to the CDK config)'}")
     typer.echo(f"  llm_api_key_file   : {config.llm_api_key_file() or '(not set — g3dt config set llm_api_key_file <path>)'}")
+    # k8s restart targets: from SSM (the CDK's optional k8s block), restarted
+    # in the listed order by restart-schema/restart-ms/dict deploy/synth deploy.
+    typer.echo(f"  restart_services   : {e.restart_services}")
+    typer.echo(f"  etl_cronjob        : {e.etl_cronjob}")
     if study:
         s = study_of(study, env)
         typer.secho(f"Study: {study} -> {s.key}", bold=True)
@@ -217,6 +221,16 @@ def diff(
     for camel, leaf in {"provider": "llm_provider", "model": "llm_model"}.items():
         if camel in llm:
             check(f"llm.{camel}", llm.get(camel), rc.get(f"app/{leaf}"))
+    k8s = inputs.get("k8s") or {}
+    if "schemaRestartServices" in k8s:
+        # The CDK publishes the list comma-joined; compare the same shape.
+        check(
+            "k8s.schemaRestartServices",
+            ",".join(k8s.get("schemaRestartServices") or []),
+            rc.get("app/restart_services"),
+        )
+    if "etlCronjob" in k8s:
+        check("k8s.etlCronjob", k8s.get("etlCronjob"), rc.get("app/etl_cronjob"))
 
     if not drift:
         typer.secho(

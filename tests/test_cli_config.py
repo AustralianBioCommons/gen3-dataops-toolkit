@@ -356,3 +356,45 @@ def test_script_env_exports_llm_facts_only_when_model_set():
 
     without_model = config.script_env(config.EnvConfig(**base))
     assert "G3DT_LLM_MODEL" not in without_model
+
+
+@mock_aws
+def test_restart_targets_resolved_from_optional_app_inputs():
+    """
+    Inputs:  an env tree with app/restart_services and app/etl_cronjob set
+             (what the CDK's optional k8s config block publishes)
+    Expected: EnvConfig carries both, so every restart path (k8s restart-*,
+             dict deploy, synth deploy) uses the deployment's own targets —
+             e.g. a commons that excludes portal because its frontend is
+             redeployed manually.
+    """
+    _seed_env("etl", "test")
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(
+        Name="/etl/test/app/restart_services",
+        Value="sheepdog-deployment,guppy-deployment", Type="String",
+    )
+    ssm.put_parameter(
+        Name="/etl/test/app/etl_cronjob", Value="my-etl", Type="String"
+    )
+
+    e = config.resolve_env("test")
+    assert e.restart_services == "sheepdog-deployment,guppy-deployment"
+    assert e.etl_cronjob == "my-etl"
+
+
+@mock_aws
+def test_restart_targets_default_when_absent():
+    """
+    Inputs:  an env tree WITHOUT app/restart_services or app/etl_cronjob
+             (every deployment whose config has no k8s block)
+    Expected: the classic Gen3 defaults — NOT a resolution error. These keys
+             are deliberately not in REQUIRED_APP_KEYS so existing
+             environments keep restarting exactly what they always did.
+    """
+    _seed_env("etl", "test")
+
+    e = config.resolve_env("test")
+    assert e.restart_services == config.DEFAULT_RESTART_SERVICES
+    assert e.etl_cronjob == config.DEFAULT_ETL_CRONJOB
+    assert "portal-deployment" in e.restart_services

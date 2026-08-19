@@ -174,6 +174,21 @@ g3dt synth generate AusDiab_Simulated --llm -n 5 -e test
 `g3dt config show --env <env>` prints the resolved provider, model, and key
 path.
 
+### Kubernetes restart targets
+
+`k8s restart-schema`, `k8s restart-ms`, `dict deploy`, and `synth deploy`
+restart the commons' schema microservices **serially, in a configured order**,
+waiting for each rollout to go Healthy before the next; `k8s restart-etl` and
+the deploy flows run a named ETL cronjob. Both targets resolve with precedence
+**CLI flags > SSM > default**: the CDK config's optional `k8s` block publishes
+`app/restart_services` (comma-separated deployment names) and
+`app/etl_cronjob`, `--restart-services` / `--etl-cronjob` override them for
+one run, and environments deployed without the block keep the classic Gen3 set
+(`sheepdog-deployment,peregrine-deployment,guppy-deployment,portal-deployment`
+/ `etl-cronjob`). A commons that manages some service outside this flow (e.g.
+a manually redeployed frontend) simply omits it from the list in its wrapper
+config. `g3dt config show --env <env>` prints the resolved values.
+
 ## Verifying download access (check-download)
 
 Registration alone does not prove a file can be downloaded. Two failure modes
