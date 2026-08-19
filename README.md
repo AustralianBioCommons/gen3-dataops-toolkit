@@ -193,7 +193,10 @@ g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100 --prev-version v1
 `deploy --skip-dict` runs the synthetic-data-only flow (delete previous
 batch, generate, upload, ETL) without re-uploading the dictionary or
 restarting the schema microservices — use it when the deployed dictionary is
-already current.
+already current. Deleting the previous batch is the flow's one destructive
+step, so it asks for confirmation (decline to skip it, or pass
+`--skip-delete` to skip without prompting); on a first deploy, when no
+previous batch exists locally, deletion is skipped automatically.
 
 `deploy` without `--studies` falls back to the original ACDC demo set
 (`AusDiab_Simulated,Baker-Biobank_Simulated,BioHeart-CT_Simulated,CAUGHT-CAD_Simulated`

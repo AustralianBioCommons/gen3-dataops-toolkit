@@ -111,16 +111,26 @@ else
     fi
 fi
 
-echo "==== [4] Deleting old synthetic data (${STUDIES}) for version ${PREV_VERSION} ===="
-DELETE_SYNTH_ARGS=(
-    -p "${STUDIES}"
-    -s "${AWS_SECRET_NAME}"
-    -i "${DATA_IMPORT_ORDER_FILE}"
-)
-if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
-    DELETE_SYNTH_ARGS+=(-profile "${G3DT_AWS_PROFILE}")
+if [ -n "${G3DT_SYNTH_SKIP_DELETE:-}" ]; then
+    echo "==== [4] Skipping deletion of the previous synthetic batch (per operator choice) ===="
+elif [ ! -f "${DATA_IMPORT_ORDER_FILE}" ]; then
+    # First deploy for these studies (or a different --prev-version): there is
+    # no previous local batch to walk, so there is nothing to delete.
+    echo "==== [4] No previous batch found — skipping deletion ===="
+    echo "     (missing ${DATA_IMPORT_ORDER_FILE};"
+    echo "      first deploy for these studies, or pass --prev-version)"
+else
+    echo "==== [4] Deleting old synthetic data (${STUDIES}) for version ${PREV_VERSION} ===="
+    DELETE_SYNTH_ARGS=(
+        -p "${STUDIES}"
+        -s "${AWS_SECRET_NAME}"
+        -i "${DATA_IMPORT_ORDER_FILE}"
+    )
+    if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
+        DELETE_SYNTH_ARGS+=(-profile "${G3DT_AWS_PROFILE}")
+    fi
+    python3 "${SERVICE_DIR}/synthetic_data/delete_synth_metadata_sheepdog.py" "${DELETE_SYNTH_ARGS[@]}"
 fi
-python3 "${SERVICE_DIR}/synthetic_data/delete_synth_metadata_sheepdog.py" "${DELETE_SYNTH_ARGS[@]}"
 
 echo "==== [5] Generating new synthetic data (${STUDIES}) for version ${VERSION} (LLM-realistic) ===="
 bash "${SERVICE_DIR}/synthetic_data/generate_synth_metadata.sh" \
