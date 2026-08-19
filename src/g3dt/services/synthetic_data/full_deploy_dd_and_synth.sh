@@ -43,10 +43,24 @@ ARGO_SCRIPT_DIR="${SERVICE_DIR}/k8s_ops"
 SCHEMA_DIR="${G3DT_SCHEMA_DIR:-$HOME/.g3dt/schemas}"
 SYNTH_BASE="${G3DT_SYNTH_DIR:-$HOME/.g3dt/synth_metadata}"
 
+# Batch inputs (set by `g3dt synth deploy --studies/--num-records/--prev-version`;
+# the fallbacks are the original ACDC demo values, kept for continuity).
+STUDIES="${G3DT_SYNTH_STUDIES:-AusDiab_Simulated,Baker-Biobank_Simulated,BioHeart-CT_Simulated,CAUGHT-CAD_Simulated}"
+if [ -n "${G3DT_SYNTH_NUM_RECORDS:-}" ]; then
+    NUM_RECORDS="${G3DT_SYNTH_NUM_RECORDS}"
+elif [ -n "${G3DT_SYNTH_STUDIES:-}" ]; then
+    NUM_RECORDS="30"          # custom studies, no counts given: 30 per study
+else
+    NUM_RECORDS="30,60,20,55" # the classic per-study counts for the demo set
+fi
+PREV_VERSION="${G3DT_SYNTH_PREV_VERSION:-v1.0.0}"
+
 # Derived variables
-PREV_VERSION="v1.0.0"
 SYNTH_META_DIR="${SYNTH_BASE}/${VERSION}/"
-DATA_IMPORT_ORDER_FILE="${SYNTH_BASE}/${PREV_VERSION}/AusDiab_Simulated/DataImportOrder.txt"
+# The delete step walks the previous batch's import order; every study in a
+# batch shares one, so the first study's copy serves.
+FIRST_STUDY="${STUDIES%%,*}"
+DATA_IMPORT_ORDER_FILE="${SYNTH_BASE}/${PREV_VERSION}/${FIRST_STUDY}/DataImportOrder.txt"
 
 # Never export an empty AWS_PROFILE (empty means ambient credentials).
 if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
@@ -87,9 +101,9 @@ bash "${ARGO_SCRIPT_DIR}/argocd_restart_schema.sh" \
     -a "${APP_NAME}" \
     -n "${NAMESPACE}"
 
-echo "==== [4] Deleting old synthetic data for version ${PREV_VERSION} ===="
+echo "==== [4] Deleting old synthetic data (${STUDIES}) for version ${PREV_VERSION} ===="
 DELETE_SYNTH_ARGS=(
-    -p "AusDiab_Simulated,EDCAD-PMS_Simulated,PREDICT_Simulated,Baker-Biobank_Simulated,CAUGHT-CAD_Simulated,BioHeart-CT_Simulated"
+    -p "${STUDIES}"
     -s "${AWS_SECRET_NAME}"
     -i "${DATA_IMPORT_ORDER_FILE}"
 )
@@ -98,12 +112,13 @@ if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
 fi
 python3 "${SERVICE_DIR}/synthetic_data/delete_synth_metadata_sheepdog.py" "${DELETE_SYNTH_ARGS[@]}"
 
-echo "==== [5] Generating new synthetic data for version ${VERSION} (LLM-realistic) ===="
+echo "==== [5] Generating new synthetic data (${STUDIES}) for version ${VERSION} (LLM-realistic) ===="
 bash "${SERVICE_DIR}/synthetic_data/generate_synth_metadata.sh" \
     --schema "${SCHEMA_DIR}/${DICT_FILENAME}" \
     --version "${VERSION}" \
     --provider llm \
-    --num-records "30,60,20,55" \
+    --studies "${STUDIES}" \
+    --num-records "${NUM_RECORDS}" \
     --output-root "${SYNTH_BASE}"
 
 echo "==== [6] Uploading new synthetic data for version ${VERSION} ===="
