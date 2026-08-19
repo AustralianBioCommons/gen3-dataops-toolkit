@@ -46,17 +46,19 @@ def submit_synthetic_metadata(
 
         logger.info("Found %d metadata files for submission.", len(file_list))
 
+        # upload_to_database=False: this flow only submits to Sheepdog, so the
+        # audit-table settings (database/table/athena_s3_output) are unused.
         submitter = MetadataSubmitter(
             metadata_file_list=file_list,
             api_key=api_key,
             project_id=project_id,
             data_import_order_path=data_import_order_path,
+            database=None,
+            table=None,
+            athena_s3_output=None,
             max_size_kb=max_submission_size_kb,
             aws_profile=aws_profile,
             upload_to_database=False,
-            dataset_root=None,
-            database=None,
-            table=None
         )
         submitter.submit_metadata()
         logger.info("Finished submitting for project_id=%s", project_id)
@@ -132,7 +134,15 @@ def main():
         "Looking for project subdirectories in base directory: %s",
         args.base_dir
     )
-    project_id_list = os.listdir(args.base_dir)
+    # Only real directories are projects: the batch dir also holds files like
+    # .g3dt-provenance.json (written by `g3dt synth generate`), which must not
+    # be treated as a project to submit.
+    project_id_list = sorted(
+        entry
+        for entry in os.listdir(args.base_dir)
+        if os.path.isdir(os.path.join(args.base_dir, entry))
+        and not entry.startswith(".")
+    )
     logger.info(
         "Found %d project subdirectories: %s",
         len(project_id_list),
