@@ -54,7 +54,12 @@ def test_synth_deploy_staging_runs_without_prompt(mock_run, _env):
     Inputs:  g3dt synth deploy --env staging
     Expected Output: staging is not prod, so the deploy runs once with no prompt.
     """
-    result = runner.invoke(app, ["synth", "deploy", "--env", "staging"])
+    # --skip-delete avoids the (separate) delete-confirmation prompt, so
+    # this stays a pure test of the prod gate: staging must not require the
+    # typed environment confirmation.
+    result = runner.invoke(
+        app, ["synth", "deploy", "--env", "staging", "--skip-delete"]
+    )
     assert result.exit_code == 0, result.output
     mock_run.assert_called_once()
 

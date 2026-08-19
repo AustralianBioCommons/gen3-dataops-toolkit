@@ -232,6 +232,12 @@ def deploy(
         "synthetic data only: delete previous batch, generate, upload, run "
         "ETL. Use when the deployed dictionary is already current.",
     ),
+    skip_delete: bool = typer.Option(
+        False, "--skip-delete",
+        help="Skip step 3 (deleting the previous synthetic batch) without "
+        "prompting. Without this flag, deletion asks for confirmation; "
+        "declining skips it and the flow continues.",
+    ),
 ) -> None:
     """Full end-to-end synthetic deploy: the whole cycle in one command.
 
@@ -251,6 +257,11 @@ def deploy(
     synthetic-data only. Equivalent by hand: synth delete + synth generate +
     synth upload + k8s restart-etl.
 
+    Step 3 is destructive, so it asks for confirmation (skip it outright with
+    --skip-delete, or decline the prompt — the flow continues either way).
+    On a first deploy, when no previous batch exists locally, deletion is
+    skipped automatically.
+
     Provider/model, restart targets, and the ETL cronjob come from the env's
     SSM tree unless overridden; the API key path comes from
     --llm-api-key-file or the marker. Studies and record counts are batch
@@ -265,6 +276,15 @@ def deploy(
     safety.confirm_prod_strict("synthetic full deploy", env)
     effective_studies = studies or DEPLOY_DEFAULT_STUDIES
     _check_per_study_counts(effective_studies, num_records)
+    if not skip_delete:
+        # Deleting the previous batch is the one destructive step in the
+        # flow; declining just skips it — everything else still runs.
+        effective_prev = prev_version or DEPLOY_DEFAULT_PREV_VERSION
+        skip_delete = not typer.confirm(
+            f"Delete the previous synthetic batch ({effective_studies} @ "
+            f"{effective_prev}) from the commons before uploading the new one?",
+            default=True,
+        )
     env_vars = script_env(e)
     env_vars.update(_llm_env_overrides(e, llm_provider, llm_model, llm_api_key_file))
     if restart_services:
@@ -279,6 +299,8 @@ def deploy(
         env_vars["G3DT_SYNTH_PREV_VERSION"] = prev_version
     if skip_dict:
         env_vars["G3DT_SYNTH_SKIP_DICT"] = "1"
+    if skip_delete:
+        env_vars["G3DT_SYNTH_SKIP_DELETE"] = "1"
     runner.run(
         runner.bash_script(
             "services/synthetic_data/full_deploy_dd_and_synth.sh", env

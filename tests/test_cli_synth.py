@@ -289,6 +289,7 @@ def test_deploy_studies_and_counts_reach_the_script(mock_run, _env):
         app,
         ["synth", "deploy", "--env", "test", "--studies", "synthetic_dataset_1",
          "-n", "100", "--prev-version", "v1.2.0"],
+        input="y\n",
     )
     assert result.exit_code == 0, result.output
     env = _deploy_env(mock_run)
@@ -305,11 +306,11 @@ def test_deploy_without_batch_flags_leaves_script_defaults(mock_run, _env):
     Expected Output: no G3DT_SYNTH_* vars are injected — the script falls back
     to the documented ACDC demo defaults, exactly as before this change.
     """
-    result = runner.invoke(app, ["synth", "deploy", "--env", "test"])
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="y\n")
     assert result.exit_code == 0, result.output
     env = _deploy_env(mock_run)
     for key in ("G3DT_SYNTH_STUDIES", "G3DT_SYNTH_NUM_RECORDS",
-                "G3DT_SYNTH_PREV_VERSION"):
+                "G3DT_SYNTH_PREV_VERSION", "G3DT_SYNTH_SKIP_DELETE"):
         assert key not in env
 
 
@@ -341,11 +342,42 @@ def test_deploy_skip_dict_reaches_the_script(mock_run, _env):
     synthetic-data-only flow (delete, generate, upload, ETL); without the
     flag the var is absent and the full flow runs.
     """
-    result = runner.invoke(app, ["synth", "deploy", "--env", "test", "--skip-dict"])
+    result = runner.invoke(
+        app, ["synth", "deploy", "--env", "test", "--skip-dict"], input="y\n"
+    )
     assert result.exit_code == 0, result.output
     assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DICT"] == "1"
 
     mock_run.reset_mock()
-    result = runner.invoke(app, ["synth", "deploy", "--env", "test"])
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="y\n")
     assert result.exit_code == 0, result.output
     assert "G3DT_SYNTH_SKIP_DICT" not in _deploy_env(mock_run)
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_deploy_prompts_before_deleting_previous_batch(mock_run, _env):
+    """
+    Inputs:  synth deploy, answering "n" to the delete confirmation
+    Expected Output: deletion is skipped (G3DT_SYNTH_SKIP_DELETE=1) but the
+    flow still runs — deleting the previous batch is the one destructive step
+    in the pipeline, so it is confirm-or-skip, never silent.
+    """
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert "Delete the previous synthetic batch" in result.output
+    assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DELETE"] == "1"
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_deploy_skip_delete_flag_skips_without_prompting(mock_run, _env):
+    """
+    Inputs:  synth deploy --skip-delete (no stdin available)
+    Expected Output: no confirmation prompt at all and deletion skipped —
+    the explicit flag is the non-interactive path.
+    """
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test", "--skip-delete"])
+    assert result.exit_code == 0, result.output
+    assert "Delete the previous synthetic batch" not in result.output
+    assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DELETE"] == "1"
