@@ -398,3 +398,28 @@ def test_restart_targets_default_when_absent():
     assert e.restart_services == config.DEFAULT_RESTART_SERVICES
     assert e.etl_cronjob == config.DEFAULT_ETL_CRONJOB
     assert "portal-deployment" in e.restart_services
+
+
+def test_script_env_puts_interpreter_bin_dir_on_path():
+    """
+    Inputs:  a hand-built EnvConfig, any PATH
+    Expected: the interpreter's bin directory leads the subprocess PATH.
+
+    `g3dt synth install-simulator` pip-installs gen3-metadata-simulator into
+    g3dt's own environment, but a pipx install exposes only g3dt's entry
+    points on the caller's PATH — so the generator script's
+    `command -v gen3-metadata-simulator` failed with "not found" immediately
+    after a successful install. Exporting the venv's bin dir makes wrapped
+    scripts see every console script installed next to g3dt.
+    """
+    import os
+    import sys
+    from pathlib import Path
+
+    e = config.EnvConfig(
+        name="test", is_ec2=False, region=REGION, dictionary_version="v1",
+        aws_profile=None, aws_secret_name="s", schema_s3_uri="u", domain="d",
+        app_name="a", namespace="n", cluster_name="c", schema_repo="Org/r",
+    )
+    path = config.script_env(e)["PATH"]
+    assert path.split(os.pathsep)[0] == str(Path(sys.executable).parent)

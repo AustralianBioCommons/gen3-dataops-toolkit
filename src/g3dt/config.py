@@ -428,8 +428,24 @@ def script_env(e: EnvConfig, version: Optional[str] = None) -> Dict[str, str]:
     scripts compose a URL keeps Python the single source of truth: the scripts
     read ``G3DT_DICT_URL``/``G3DT_DICT_FILENAME`` and never build either
     themselves, so there is only one implementation to keep correct.
+
+    The interpreter's own bin directory is prepended to PATH: console scripts
+    installed next to g3dt — gen3-metadata-simulator via
+    ``g3dt synth install-simulator`` — land there, but a pipx install exposes
+    only g3dt's own entry points on the caller's PATH, so without this the
+    wrapped scripts' ``command -v gen3-metadata-simulator`` check fails even
+    though the tool is installed.
     """
+    import sys
+
     env = dict(os.environ)
+    # No .resolve(): a venv's python is a symlink to the base interpreter, and
+    # resolving it would point at the base install's bin instead of the venv
+    # bin where console scripts are actually created.
+    venv_bin = str(Path(sys.executable).parent)
+    path_entries = env.get("PATH", "").split(os.pathsep)
+    if venv_bin not in path_entries:
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
     values = {
         "G3DT_ENV": e.name,
         "G3DT_REGION": e.region,
