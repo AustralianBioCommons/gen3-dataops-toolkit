@@ -329,3 +329,23 @@ def test_deploy_rejects_mismatched_count_list(mock_run, _env):
     assert result.exit_code == 1
     assert "--num-records has 2 values but 1 studies" in result.output
     mock_run.assert_not_called()
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_deploy_skip_dict_reaches_the_script(mock_run, _env):
+    """
+    Inputs:  synth deploy --skip-dict
+    Expected Output: G3DT_SYNTH_SKIP_DICT=1 in the subprocess env — the script
+    then skips the dictionary S3 upload and schema restarts, running the
+    synthetic-data-only flow (delete, generate, upload, ETL); without the
+    flag the var is absent and the full flow runs.
+    """
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test", "--skip-dict"])
+    assert result.exit_code == 0, result.output
+    assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DICT"] == "1"
+
+    mock_run.reset_mock()
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    assert "G3DT_SYNTH_SKIP_DICT" not in _deploy_env(mock_run)

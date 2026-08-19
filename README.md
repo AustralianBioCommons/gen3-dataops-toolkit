@@ -190,6 +190,11 @@ g3dt synth generate synthetic_dataset_1 --llm -n 100 -e test
 g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100 --prev-version v1.2.0
 ```
 
+`deploy --skip-dict` runs the synthetic-data-only flow (delete previous
+batch, generate, upload, ETL) without re-uploading the dictionary or
+restarting the schema microservices — use it when the deployed dictionary is
+already current.
+
 `deploy` without `--studies` falls back to the original ACDC demo set
 (`AusDiab_Simulated,Baker-Biobank_Simulated,BioHeart-CT_Simulated,CAUGHT-CAD_Simulated`
 at 30,60,20,55 records, previous batch `v1.0.0`) — kept for continuity; any
