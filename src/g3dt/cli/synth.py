@@ -503,7 +503,11 @@ def delete(
 
 @app.command(name="install-simulator")
 def install_simulator() -> None:
-    """Install the gen3-metadata-simulator generator (the 'synth' extra)."""
+    """Install or upgrade the gen3-metadata-simulator generator (the 'synth' extra)."""
     import sys
 
-    runner.run([sys.executable, "-m", "pip", "install", "gen3-metadata-simulator"])
+    # --upgrade so re-running after a simulator release actually updates it;
+    # without it pip leaves an existing (stale) install untouched.
+    runner.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", "gen3-metadata-simulator"]
+    )

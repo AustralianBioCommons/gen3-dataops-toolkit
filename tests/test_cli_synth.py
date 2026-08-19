@@ -381,3 +381,22 @@ def test_deploy_skip_delete_flag_skips_without_prompting(mock_run, _env):
     assert result.exit_code == 0, result.output
     assert "Delete the previous synthetic batch" not in result.output
     assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DELETE"] == "1"
+
+
+@patch("g3dt.cli._internal.runner.run")
+def test_install_simulator_upgrades_an_existing_install(mock_run):
+    """
+    Inputs:  g3dt synth install-simulator
+    Expected Output: pip is invoked with --upgrade.
+
+    Without --upgrade, pip treats an already-installed simulator as satisfied
+    and exits without touching it — so operators who re-ran install-simulator
+    after a simulator release stayed silently pinned to the stale version
+    (observed live: 0.4.0 kept generating duplicate submitter_ids after 0.5.0
+    fixed them). The command must be the upgrade path, not install-once.
+    """
+    result = runner.invoke(app, ["synth", "install-simulator"])
+    assert result.exit_code == 0, result.output
+    argv = list(mock_run.call_args_list[-1].args[0])
+    assert "--upgrade" in argv
+    assert "gen3-metadata-simulator" in argv
