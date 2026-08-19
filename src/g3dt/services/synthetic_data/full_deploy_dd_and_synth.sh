@@ -84,22 +84,32 @@ if ! aws eks update-kubeconfig \
     exit 1
 fi
 
-echo "==== [1] Pulling dictionary for version ${VERSION} ===="
-bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}" "${DICT_FILENAME}"
+if [ -z "${G3DT_SYNTH_SKIP_DICT:-}" ]; then
+    echo "==== [1] Pulling dictionary for version ${VERSION} ===="
+    bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}" "${DICT_FILENAME}"
 
-echo "==== [2] Uploading dictionary to S3: s3://${SCHEMA_S3_URI} ===="
-UPLOAD_DICT_ARGS=("${SCHEMA_DIR}/${DICT_FILENAME}" "s3://${SCHEMA_S3_URI}")
-# The optional trailing positional is the AWS profile; omit it for ambient credentials.
-if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
-    UPLOAD_DICT_ARGS+=("${G3DT_AWS_PROFILE}")
+    echo "==== [2] Uploading dictionary to S3: s3://${SCHEMA_S3_URI} ===="
+    UPLOAD_DICT_ARGS=("${SCHEMA_DIR}/${DICT_FILENAME}" "s3://${SCHEMA_S3_URI}")
+    # The optional trailing positional is the AWS profile; omit it for ambient credentials.
+    if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
+        UPLOAD_DICT_ARGS+=("${G3DT_AWS_PROFILE}")
+    fi
+    python3 "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${UPLOAD_DICT_ARGS[@]}"
+
+    echo "==== [3] Restarting microservices (schema) ===="
+    bash "${ARGO_SCRIPT_DIR}/argocd_restart_schema.sh" \
+        -d "${DOMAIN}" \
+        -a "${APP_NAME}" \
+        -n "${NAMESPACE}"
+else
+    echo "==== [1-3] Skipped dictionary upload + schema restarts (--skip-dict) ===="
+    # Generation still validates against the local schema copy — fetch it if
+    # it is missing (a local download only; the commons is not touched).
+    if [ ! -f "${SCHEMA_DIR}/${DICT_FILENAME}" ]; then
+        echo "Local schema missing; pulling ${VERSION}..."
+        bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}" "${DICT_FILENAME}"
+    fi
 fi
-python3 "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${UPLOAD_DICT_ARGS[@]}"
-
-echo "==== [3] Restarting microservices (schema) ===="
-bash "${ARGO_SCRIPT_DIR}/argocd_restart_schema.sh" \
-    -d "${DOMAIN}" \
-    -a "${APP_NAME}" \
-    -n "${NAMESPACE}"
 
 echo "==== [4] Deleting old synthetic data (${STUDIES}) for version ${PREV_VERSION} ===="
 DELETE_SYNTH_ARGS=(

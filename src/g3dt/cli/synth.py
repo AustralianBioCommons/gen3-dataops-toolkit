@@ -226,6 +226,12 @@ def deploy(
         help="Dictionary version whose previously-uploaded synthetic batch is "
         f"deleted before uploading the new one. Default: {DEPLOY_DEFAULT_PREV_VERSION}.",
     ),
+    skip_dict: bool = typer.Option(
+        False, "--skip-dict",
+        help="Skip the dictionary upload and schema restarts (steps 1-2) — "
+        "synthetic data only: delete previous batch, generate, upload, run "
+        "ETL. Use when the deployed dictionary is already current.",
+    ),
 ) -> None:
     """Full end-to-end synthetic deploy: the whole cycle in one command.
 
@@ -240,6 +246,11 @@ def deploy(
       5. upload the new batch to Gen3
       6. run the ETL cronjob (env's SSM etl_cronjob)
 
+    With --skip-dict, steps 1-2 are skipped (the schema is still fetched
+    locally if missing — generation validates against it) and the flow is
+    synthetic-data only. Equivalent by hand: synth delete + synth generate +
+    synth upload + k8s restart-etl.
+
     Provider/model, restart targets, and the ETL cronjob come from the env's
     SSM tree unless overridden; the API key path comes from
     --llm-api-key-file or the marker. Studies and record counts are batch
@@ -247,6 +258,7 @@ def deploy(
 
     Examples:
       g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100
+      g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100 --skip-dict
       g3dt synth deploy -e test --studies "s1,s2" -n "100,50" --prev-version v1.2.0
     """
     e = env_of(env)
@@ -265,6 +277,8 @@ def deploy(
         env_vars["G3DT_SYNTH_NUM_RECORDS"] = num_records
     if prev_version:
         env_vars["G3DT_SYNTH_PREV_VERSION"] = prev_version
+    if skip_dict:
+        env_vars["G3DT_SYNTH_SKIP_DICT"] = "1"
     runner.run(
         runner.bash_script(
             "services/synthetic_data/full_deploy_dd_and_synth.sh", env
