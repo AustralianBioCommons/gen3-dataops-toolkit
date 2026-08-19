@@ -6,8 +6,11 @@ usage() {
     echo "Usage: $0 [-d DOMAIN] [-a APPNAME] [-r RESOURCES] [-n NAMESPACE] [-k KIND] [-l] [-s]"
     echo "  -d DOMAIN      The domain for argocd login (example: cd.cad.test.biocommons.org.au)"
     echo "  -a APPNAME     The application name (example: uatgen3)"
-    echo "  -r RESOURCES   Comma-separated string of microservice names to restart (example: sheepdog-deployment,peregrine-deployment )"
-    echo "  -n NAMESPACE   The namespace for the resources (example: cad)"
+    echo "  -r RESOURCES   Comma-separated microservice names, restarted in order"
+    echo "                 (default: \$G3DT_RESTART_SERVICES — the env's SSM"
+    echo "                 app/restart_services, set by g3dt — else the classic"
+    echo "                 sheepdog,peregrine,guppy,portal set)"
+    echo "  -n NAMESPACE   The namespace for the resources (default: \$G3DT_NAMESPACE)"
     echo "  -k KIND        The kind of resource to restart (default: Deployment)"
     echo "  -l             Bypass login"
     echo "  -s             Sync the argocd app before restarting resources"
@@ -16,7 +19,10 @@ usage() {
 
 set -eo pipefail
 
-# Parse command line arguments
+# Parse command line arguments. The restart set defaults to the environment's
+# SSM app/restart_services (exported by g3dt as G3DT_RESTART_SERVICES).
+IFS=',' read -r -a RESOURCES <<< "${G3DT_RESTART_SERVICES:-sheepdog-deployment,peregrine-deployment,guppy-deployment,portal-deployment}"
+NAMESPACE="${G3DT_NAMESPACE:-}"
 LOGIN_REQUIRED=true
 KIND="Deployment"
 SYNC_APP=false
@@ -51,6 +57,11 @@ while getopts "d:a:r:n:k:hls" opt; do
             ;;
     esac
 done
+
+if [ -z "$NAMESPACE" ]; then
+    echo "No namespace given: pass -n, or run via the g3dt CLI (which sets G3DT_NAMESPACE)." >&2
+    exit 1
+fi
 
 # Check if argocd is installed
 if ! command -v argocd &> /dev/null

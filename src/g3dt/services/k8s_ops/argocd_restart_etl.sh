@@ -6,7 +6,7 @@ usage() {
     echo "  -d DOMAIN      The domain for argocd login (example: cd.cad.test.biocommons.org.au)"
     echo "  -a APPNAME     The application name (example: uatgen3)"
     echo "  -n NAMESPACE   The namespace for the resources (example: cad)"
-    echo "  -c ETL_CRONJOB The name of the ETL cronjob to run (default: etl-cronjob)"
+    echo "  -c ETL_CRONJOB The name of the ETL cronjob to run (default: \$G3DT_ETL_CRONJOB — the env's SSM app/etl_cronjob, set by g3dt — else etl-cronjob)"
     echo "  -t CONTAINER   The name of the container to check logs from (default: tube)"
     echo "  -l             Bypass login"
     echo "  -s             Sync the argocd app before restarting resources"
@@ -15,8 +15,9 @@ usage() {
 
 set -eo pipefail
 
-# default values
-ETL_CRONJOB="etl-cronjob"
+# default values. The cronjob name comes from the environment's SSM tree
+# (app/etl_cronjob, exported by g3dt as G3DT_ETL_CRONJOB).
+ETL_CRONJOB="${G3DT_ETL_CRONJOB:-etl-cronjob}"
 CONTAINER_TO_CHECK="tube"
 LOGIN_REQUIRED=true
 SYNC_APP=false

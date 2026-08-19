@@ -103,6 +103,11 @@ def deploy(
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),
+    restart_services: Optional[str] = typer.Option(
+        None, "--restart-services",
+        help="Comma-separated deployment names restarted after the upload, in "
+        "order; default: the env's SSM app/restart_services.",
+    ),
 ) -> None:
     """Pull + upload the dictionary and restart Gen3 schema microservices.
 
@@ -123,7 +128,10 @@ def deploy(
     """
     e = env_of(env)
     warn_if_overridden(e, version)
+    env_vars = script_env(e, _version(e, version))
+    if restart_services:
+        env_vars["G3DT_RESTART_SERVICES"] = restart_services
     runner.run(
         runner.bash_script("services/dictionary/deploy_dd.sh", env),
-        env=script_env(e, _version(e, version)),
+        env=env_vars,
     )

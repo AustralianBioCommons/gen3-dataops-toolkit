@@ -58,6 +58,17 @@ DEFAULT_DICT_PATH = "dictionary/prod_dict/acdc_schema.json"
 #: when the ``--llm`` path is used and no model is configured anywhere.
 DEFAULT_LLM_PROVIDER = "anthropic"
 
+#: Kubernetes restart targets, published by the CDK's OPTIONAL ``k8s`` config
+#: block as ``app/restart_services`` (comma-separated, restarted in order) and
+#: ``app/etl_cronjob``. Optional app inputs: environments deployed without the
+#: block keep the classic Gen3 set. Consumed by every restart path — `g3dt
+#: k8s restart-schema/restart-etl/restart-ms`, `dict deploy`, `synth deploy` —
+#: via $G3DT_RESTART_SERVICES / $G3DT_ETL_CRONJOB in the service scripts.
+DEFAULT_RESTART_SERVICES = (
+    "sheepdog-deployment,peregrine-deployment,guppy-deployment,portal-deployment"
+)
+DEFAULT_ETL_CRONJOB = "etl-cronjob"
+
 #: Marker locations, most specific first.
 MARKER_PATHS = ("g3dt.yaml", "~/.g3dt/g3dt.yaml", "/etc/g3dt/g3dt.yaml")
 
@@ -257,6 +268,9 @@ class EnvConfig:
     # with guidance rather than silently picking a model.
     llm_provider: str = DEFAULT_LLM_PROVIDER
     llm_model: Optional[str] = None
+    # Optional k8s restart targets (SSM app/restart_services, app/etl_cronjob).
+    restart_services: str = DEFAULT_RESTART_SERVICES
+    etl_cronjob: str = DEFAULT_ETL_CRONJOB
 
 
 def _app_or_default(rc, leaf: str, default: str) -> str:
@@ -320,6 +334,10 @@ def resolve_env(env: str, project: Optional[str] = None) -> EnvConfig:
         # the config has an llm block, so absence means "use the defaults".
         llm_provider=_app_or_default(rc, "llm_provider", DEFAULT_LLM_PROVIDER),
         llm_model=(_app_or_default(rc, "llm_model", "") or None),
+        restart_services=_app_or_default(
+            rc, "restart_services", DEFAULT_RESTART_SERVICES
+        ),
+        etl_cronjob=_app_or_default(rc, "etl_cronjob", DEFAULT_ETL_CRONJOB),
     )
 
 
@@ -428,6 +446,8 @@ def script_env(e: EnvConfig, version: Optional[str] = None) -> Dict[str, str]:
         "G3DT_SCHEMA_REPO": e.schema_repo,
         "G3DT_LLM_PROVIDER": e.llm_provider,
         "G3DT_LLM_MODEL": e.llm_model,
+        "G3DT_RESTART_SERVICES": e.restart_services,
+        "G3DT_ETL_CRONJOB": e.etl_cronjob,
     }
     env.update({k: v for k, v in values.items() if v is not None})
     return env

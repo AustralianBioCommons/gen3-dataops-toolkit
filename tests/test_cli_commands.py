@@ -13,6 +13,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from g3dt.cli.main import app
+from g3dt import config as config_mod
 from g3dt.config import ConfigError, EnvConfig, StudyConfig, dictionary_url
 
 runner = CliRunner()
@@ -636,3 +637,52 @@ def test_indexd_check_download_samples_registry_with_limit(mock_run, _env):
     )
     assert result.exit_code == 0, result.output
     assert _argv(mock_run)[2:] == ["--env", "staging", "--limit", "5"]
+
+
+@patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_k8s_restart_schema_flag_overrides_restart_services(mock_run, _env):
+    """
+    Inputs:  k8s restart-schema --restart-services sheepdog-deployment
+    Expected Output: the override reaches the script as G3DT_RESTART_SERVICES
+    in the subprocess env (the script's default; flags > SSM > default), so a
+    one-off restart of a subset needs no redeploy.
+    """
+    result = runner.invoke(
+        app,
+        ["k8s", "restart-schema", "--env", "test",
+         "--restart-services", "sheepdog-deployment"],
+    )
+    assert result.exit_code == 0, result.output
+    env = mock_run.call_args.kwargs["env"]
+    assert env["G3DT_RESTART_SERVICES"] == "sheepdog-deployment"
+
+
+@patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_k8s_restart_schema_default_exports_env_restart_services(mock_run, _env):
+    """
+    Inputs:  k8s restart-schema with no --restart-services flag
+    Expected Output: the subprocess env carries the EnvConfig's (SSM-resolved)
+    restart set via script_env, so the script restarts exactly what the
+    deployment configured.
+    """
+    result = runner.invoke(app, ["k8s", "restart-schema", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    env = mock_run.call_args.kwargs["env"]
+    assert env["G3DT_RESTART_SERVICES"] == config_mod.DEFAULT_RESTART_SERVICES
+
+
+@patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_k8s_restart_etl_flag_overrides_cronjob(mock_run, _env):
+    """
+    Inputs:  k8s restart-etl --etl-cronjob custom-etl
+    Expected Output: G3DT_ETL_CRONJOB carries the override to the script.
+    """
+    result = runner.invoke(
+        app, ["k8s", "restart-etl", "--env", "test", "--etl-cronjob", "custom-etl"]
+    )
+    assert result.exit_code == 0, result.output
+    env = mock_run.call_args.kwargs["env"]
+    assert env["G3DT_ETL_CRONJOB"] == "custom-etl"

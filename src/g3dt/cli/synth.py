@@ -168,17 +168,31 @@ def deploy(
         help="Path to the file holding the LLM API key; default: the marker's "
         "llm_api_key_file (set once: g3dt config set llm_api_key_file <path>).",
     ),
+    restart_services: Optional[str] = typer.Option(
+        None, "--restart-services",
+        help="Comma-separated deployment names restarted during the deploy, in "
+        "order; default: the env's SSM app/restart_services.",
+    ),
+    etl_cronjob: Optional[str] = typer.Option(
+        None, "--etl-cronjob",
+        help="ETL cronjob name; default: the env's SSM app/etl_cronjob.",
+    ),
 ) -> None:
     """Full end-to-end synthetic deploy (dict + LLM-generate + upload + restarts).
 
     Wraps services/synthetic_data/full_deploy_dd_and_synth.sh (LLM-backed
-    generation). Provider/model come from the env's SSM tree unless
-    overridden; the API key path comes from --llm-api-key-file or the marker.
+    generation). Provider/model and the restart targets come from the env's
+    SSM tree unless overridden; the API key path comes from
+    --llm-api-key-file or the marker.
     """
     e = env_of(env)
     safety.confirm_prod_strict("synthetic full deploy", env)
     env_vars = script_env(e)
     env_vars.update(_llm_env_overrides(e, llm_provider, llm_model, llm_api_key_file))
+    if restart_services:
+        env_vars["G3DT_RESTART_SERVICES"] = restart_services
+    if etl_cronjob:
+        env_vars["G3DT_ETL_CRONJOB"] = etl_cronjob
     runner.run(
         runner.bash_script(
             "services/synthetic_data/full_deploy_dd_and_synth.sh", env
