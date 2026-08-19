@@ -9,6 +9,12 @@ Every command accepts ``--env``; targeting a **production** environment (any env
 whose name contains ``prod``) shows a warning and requires typing the env name to
 confirm — it cannot be bypassed.
 
+Studies and record counts are **batch inputs**, passed per command
+(``generate STUDIES -n N``, ``deploy --studies ... -n ...``) — they are not
+environment facts, so they never come from SSM. The ``deploy`` defaults are
+the original ACDC demo set, kept for continuity; other projects pass their
+own.
+
 Generation defaults to keyless ``random`` data (no API calls). Pass ``--llm``
 for LLM-realistic values. The LLM provider and model come from the
 environment's SSM tree (the CDK config's optional ``llm`` block, published as
@@ -43,6 +49,32 @@ app = typer.Typer(
 )
 
 SYNTH_DIR = Path("~/.g3dt/synth_metadata").expanduser()
+
+#: Defaults for the full-deploy flow, kept for continuity with the original
+#: ACDC demo environment. Any other project should pass --studies (and
+#: --num-records) — there is no SSM fact for these because simulated study
+#: sets are batch inputs, not environment facts.
+DEPLOY_DEFAULT_STUDIES = (
+    "AusDiab_Simulated,Baker-Biobank_Simulated,"
+    "BioHeart-CT_Simulated,CAUGHT-CAD_Simulated"
+)
+DEPLOY_DEFAULT_NUM_RECORDS = "30,60,20,55"
+DEPLOY_DEFAULT_PREV_VERSION = "v1.0.0"
+
+
+def _check_per_study_counts(studies: str, num_records: Optional[str]) -> None:
+    """Exit 1 when a per-study count list does not line up with the studies."""
+    if num_records and "," in num_records:
+        n_counts = len(num_records.split(","))
+        n_studies = len(studies.split(","))
+        if n_counts != n_studies:
+            typer.secho(
+                f"--num-records has {n_counts} values but {n_studies} studies "
+                f"were given (pass one count, or one per study).",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(1)
 
 
 def _llm_env_overrides(
@@ -177,22 +209,62 @@ def deploy(
         None, "--etl-cronjob",
         help="ETL cronjob name; default: the env's SSM app/etl_cronjob.",
     ),
+    studies: Optional[str] = typer.Option(
+        None, "--studies",
+        help="Simulated study id(s), comma-separated. These are (re)generated, "
+        "uploaded, and their previous batch deleted. Default: the original "
+        f"demo set ({DEPLOY_DEFAULT_STUDIES}).",
+    ),
+    num_records: Optional[str] = typer.Option(
+        None, "--num-records", "-n",
+        help="Records per study: one number for all, or a comma list (one per "
+        "study). Default: 30 per study (or the classic 30,60,20,55 when "
+        "--studies is not given).",
+    ),
+    prev_version: Optional[str] = typer.Option(
+        None, "--prev-version",
+        help="Dictionary version whose previously-uploaded synthetic batch is "
+        f"deleted before uploading the new one. Default: {DEPLOY_DEFAULT_PREV_VERSION}.",
+    ),
 ) -> None:
-    """Full end-to-end synthetic deploy (dict + LLM-generate + upload + restarts).
+    """Full end-to-end synthetic deploy: the whole cycle in one command.
 
-    Wraps services/synthetic_data/full_deploy_dd_and_synth.sh (LLM-backed
-    generation). Provider/model and the restart targets come from the env's
+    Wraps services/synthetic_data/full_deploy_dd_and_synth.sh, which runs:
+
+    \b
+      1. pull the dictionary at the env's version and upload it to S3
+      2. restart the schema microservices (env's SSM restart_services order)
+      3. delete the PREVIOUS synthetic batch for the given studies
+         (--prev-version, so stale records don't linger in the commons)
+      4. LLM-generate a new batch for the studies (provider/model from SSM)
+      5. upload the new batch to Gen3
+      6. run the ETL cronjob (env's SSM etl_cronjob)
+
+    Provider/model, restart targets, and the ETL cronjob come from the env's
     SSM tree unless overridden; the API key path comes from
-    --llm-api-key-file or the marker.
+    --llm-api-key-file or the marker. Studies and record counts are batch
+    inputs with ACDC-era defaults — any other project should pass --studies.
+
+    Examples:
+      g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100
+      g3dt synth deploy -e test --studies "s1,s2" -n "100,50" --prev-version v1.2.0
     """
     e = env_of(env)
     safety.confirm_prod_strict("synthetic full deploy", env)
+    effective_studies = studies or DEPLOY_DEFAULT_STUDIES
+    _check_per_study_counts(effective_studies, num_records)
     env_vars = script_env(e)
     env_vars.update(_llm_env_overrides(e, llm_provider, llm_model, llm_api_key_file))
     if restart_services:
         env_vars["G3DT_RESTART_SERVICES"] = restart_services
     if etl_cronjob:
         env_vars["G3DT_ETL_CRONJOB"] = etl_cronjob
+    if studies:
+        env_vars["G3DT_SYNTH_STUDIES"] = studies
+    if num_records:
+        env_vars["G3DT_SYNTH_NUM_RECORDS"] = num_records
+    if prev_version:
+        env_vars["G3DT_SYNTH_PREV_VERSION"] = prev_version
     runner.run(
         runner.bash_script(
             "services/synthetic_data/full_deploy_dd_and_synth.sh", env
@@ -254,25 +326,15 @@ def generate(
     generate LLM-realistic values instead.
 
     Examples:
-      g3dt synth generate AusDiab_Simulated -n 5 --seed 1
-      g3dt synth generate AusDiab_Simulated --llm -n 5
-      g3dt synth generate "AusDiab_Simulated,Baker-Biobank_Simulated" -n "30,60"
+      g3dt synth generate synthetic_dataset_1 -n 5 --seed 1
+      g3dt synth generate synthetic_dataset_1 --llm -n 100
+      g3dt synth generate "dataset_a,dataset_b" -n "30,60"
+      g3dt synth generate dataset_a --llm --llm-model gpt-4o-mini \
+          --llm-api-key-file ~/keys/openai_api_key.txt
     """
     e = env_of(env)
     safety.confirm_prod_strict("synthetic generation", env)
-
-    # A comma list of per-study counts must line up with the studies given.
-    if num_records and "," in num_records:
-        n_counts = len(num_records.split(","))
-        n_studies = len(studies.split(","))
-        if n_counts != n_studies:
-            typer.secho(
-                f"--num-records has {n_counts} values but {n_studies} studies "
-                f"were given (pass one count, or one per study).",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(1)
+    _check_per_study_counts(studies, num_records)
 
     ver = version or e.dictionary_version
     schema_path = schema or str(SCHEMA_DIR / dictionary_filename(e, ver))

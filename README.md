@@ -174,6 +174,28 @@ g3dt synth generate AusDiab_Simulated --llm -n 5 -e test
 `g3dt config show --env <env>` prints the resolved provider, model, and key
 path.
 
+### The synthetic data lifecycle
+
+`synth generate` builds a batch locally (keyless `random` by default, `--llm`
+for realistic values); `synth upload` pushes a batch to the commons; `synth
+delete` removes one; and `synth deploy` runs the whole cycle in one command —
+dictionary pull + upload, schema restarts, delete of the previous batch,
+LLM-generate, upload, and the ETL run.
+
+**Studies and record counts are batch inputs, not environment facts** — they
+are passed per command and never come from SSM:
+
+```bash
+g3dt synth generate synthetic_dataset_1 --llm -n 100 -e test
+g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100 --prev-version v1.2.0
+```
+
+`deploy` without `--studies` falls back to the original ACDC demo set
+(`AusDiab_Simulated,Baker-Biobank_Simulated,BioHeart-CT_Simulated,CAUGHT-CAD_Simulated`
+at 30,60,20,55 records, previous batch `v1.0.0`) — kept for continuity; any
+other project should always pass its own `--studies`. The deploy's delete step
+targets exactly the studies being regenerated, at `--prev-version`.
+
 ### Kubernetes restart targets
 
 `k8s restart-schema`, `k8s restart-ms`, `dict deploy`, and `synth deploy`

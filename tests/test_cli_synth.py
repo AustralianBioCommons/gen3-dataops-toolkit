@@ -264,3 +264,68 @@ def test_generate_prod_proceeds_when_env_typed(mock_run, _env, schema_dir):
     )
     assert result.exit_code == 0, result.output
     _gen_argv(mock_run)  # raises if the generate script was not invoked
+
+
+def _deploy_env(mock_run):
+    """Return the env dict of the full_deploy_dd_and_synth.sh invocation."""
+    for call in mock_run.call_args_list:
+        argv = list(call.args[0])
+        if any(str(a).endswith("full_deploy_dd_and_synth.sh") for a in argv):
+            return call.kwargs["env"]
+    raise AssertionError(f"full deploy script not invoked: {mock_run.call_args_list}")
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_deploy_studies_and_counts_reach_the_script(mock_run, _env):
+    """
+    Inputs:  synth deploy --studies synthetic_dataset_1 -n 100
+             --prev-version v1.2.0
+    Expected Output: the batch inputs reach full_deploy_dd_and_synth.sh as
+    G3DT_SYNTH_* env vars, replacing its ACDC-era hardcoded studies, record
+    counts, and previous-batch version.
+    """
+    result = runner.invoke(
+        app,
+        ["synth", "deploy", "--env", "test", "--studies", "synthetic_dataset_1",
+         "-n", "100", "--prev-version", "v1.2.0"],
+    )
+    assert result.exit_code == 0, result.output
+    env = _deploy_env(mock_run)
+    assert env["G3DT_SYNTH_STUDIES"] == "synthetic_dataset_1"
+    assert env["G3DT_SYNTH_NUM_RECORDS"] == "100"
+    assert env["G3DT_SYNTH_PREV_VERSION"] == "v1.2.0"
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_deploy_without_batch_flags_leaves_script_defaults(mock_run, _env):
+    """
+    Inputs:  synth deploy with no batch flags
+    Expected Output: no G3DT_SYNTH_* vars are injected — the script falls back
+    to the documented ACDC demo defaults, exactly as before this change.
+    """
+    result = runner.invoke(app, ["synth", "deploy", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    env = _deploy_env(mock_run)
+    for key in ("G3DT_SYNTH_STUDIES", "G3DT_SYNTH_NUM_RECORDS",
+                "G3DT_SYNTH_PREV_VERSION"):
+        assert key not in env
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_deploy_rejects_mismatched_count_list(mock_run, _env):
+    """
+    Inputs:  --studies with one study but a two-value count list
+    Expected Output: exit 1 before the script runs — the same per-study count
+    validation generate performs, so a bad batch never reaches the commons.
+    """
+    result = runner.invoke(
+        app,
+        ["synth", "deploy", "--env", "test",
+         "--studies", "only_one", "-n", "30,60"],
+    )
+    assert result.exit_code == 1
+    assert "--num-records has 2 values but 1 studies" in result.output
+    mock_run.assert_not_called()
