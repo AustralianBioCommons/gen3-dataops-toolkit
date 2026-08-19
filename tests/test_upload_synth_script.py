@@ -88,6 +88,53 @@ def test_submitter_kwargs_match_the_real_init_signature(monkeypatch, tmp_path):
     inspect.signature(MetadataSubmitter.__init__).bind(None, **recorded)
 
 
+def test_core_metadata_collection_is_excluded_from_submission(monkeypatch, tmp_path):
+    """
+    Inputs:  submit_synthetic_metadata() run with the same stubs as above,
+             capturing the exclude_nodes the script hands to MetadataSubmitter.
+    Expected: core_metadata_collection is excluded, alongside the structural
+             nodes (program/project/acknowledgement/publication).
+
+             MetadataSubmitter's own default only excludes the structural
+             four; the simulator generates core_metadata_collection with
+             random words in its date-time fields, so submitting it made a
+             live deploy fail with "Transaction aborted due to 50 invalid
+             entities" (400) — and synthetic batches have no use for that
+             node in the first place.
+    """
+    monkeypatch.chdir(tmp_path)
+    mod = _load_script()
+
+    recorded = {}
+
+    class RecordingSubmitter:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def submit_metadata(self):
+            pass
+
+    monkeypatch.setattr(mod, "MetadataSubmitter", RecordingSubmitter)
+    monkeypatch.setattr(mod, "create_boto3_session", lambda profile: object())
+    monkeypatch.setattr(
+        mod, "get_gen3_api_key_aws_secret", lambda name, region, session: {"api_key": "k"}
+    )
+    monkeypatch.setattr(
+        mod, "find_data_import_order_file", lambda d: f"{d}/DataImportOrder.txt"
+    )
+    monkeypatch.setattr(mod, "list_metadata_jsons", lambda d: [f"{d}/subject.json"])
+
+    mod.submit_synthetic_metadata(
+        base_dir=str(tmp_path / "v1.3.0" / "study_a"),
+        project_id="study_a",
+        aws_secret_name="secret",
+    )
+
+    excluded = set(recorded["exclude_nodes"])
+    assert "core_metadata_collection" in excluded
+    assert {"program", "project", "acknowledgement", "publication"} <= excluded
+
+
 def test_main_submits_only_project_directories(monkeypatch, tmp_path):
     """
     Inputs:  a batch directory laid out exactly as `g3dt synth generate`

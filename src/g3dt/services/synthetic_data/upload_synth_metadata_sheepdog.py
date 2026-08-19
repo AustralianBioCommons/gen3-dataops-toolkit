@@ -13,6 +13,19 @@ DEFAULT_REGION = "ap-southeast-2"
 DEFAULT_PROFILE = None  # ambient credentials unless --aws-profile is given
 DEFAULT_SUBMISSION_SIZE_KB = 50
 
+# Nodes never submitted from a synthetic batch. The first four are the
+# structural nodes MetadataSubmitter always excludes; core_metadata_collection
+# is excluded here too because the simulator fills its date-time fields with
+# random words, which Sheepdog rejects (400) — and synthetic data has no use
+# for it anyway.
+EXCLUDE_NODES = [
+    "program",
+    "project",
+    "acknowledgement",
+    "publication",
+    "core_metadata_collection",
+]
+
 def submit_synthetic_metadata(
     base_dir,
     project_id,
@@ -57,6 +70,7 @@ def submit_synthetic_metadata(
             table=None,
             athena_s3_output=None,
             max_size_kb=max_submission_size_kb,
+            exclude_nodes=EXCLUDE_NODES,
             aws_profile=aws_profile,
             upload_to_database=False,
         )
