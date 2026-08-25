@@ -12,8 +12,9 @@ restarts. The dbt half of the platform lives in
 [gen3-dbt-template](https://github.com/AustralianBioCommons/gen3-dbt-template).
 
 **No AWS resource name is compiled into this package.** The same wheel
-operates any project: it is targeted purely by `--env`, the project's SSM tree
-(`/{project}/{env}/...`), and a tiny local bootstrap marker.
+operates any project: it is targeted by a **context** — a named
+(project, env, profile, region) tuple — and the project's SSM tree
+(`/{project}/{env}/...`).
 
 ## Install
 
@@ -21,40 +22,49 @@ operates any project: it is targeted purely by `--env`, the project's SSM tree
 pip install gen3-dataops-toolkit
 ```
 
-## Bootstrap (the only local configuration)
+## Bootstrap: discover, then use
 
-`g3dt` needs to know just the project and region — everything else comes from
-SSM. Create `~/.g3dt/g3dt.yaml`:
-
-```yaml
-project: etl                # your projectId
-region: ap-southeast-2
-default_env: test
-profiles:                   # optional: AWS named profile per env
-  test: etl_test            # (omit entirely on EC2/CodeBuild — ambient
-  staging: etl_staging      #  role credentials are used)
-studies:                    # optional: the project's study registry;
-  mystudy_test:             # alternatively upload it once per env to
-    project_id: MyStudy     # s3://<metadata-bucket>/config/studies.yaml
-    program_id: program1
-    s3_metadata_path: s3://my-bucket/metadata/mystudy/
+```bash
+g3dt config discover --all-profiles --add   # find every deployed env your
+                                            # AWS profiles can see; register
+                                            # them as contexts
+g3dt config contexts                        # list them (current marked *)
+g3dt config use myproj/test                 # point g3dt at one
 ```
 
+That writes `~/.g3dt/g3dt.yaml` for you. **Every command prints the active
+context first** (on stderr) — read that line before anything else:
+
+```
+ctx myproj/test → project=myproj env=test profile=myproj_test region=ap-southeast-2
+```
+
+Production contexts are marked `[PROD]`, switching to one asks for
+confirmation, and destructive actions on them require typing the context
+name — `--yes` never bypasses that.
+
+The marker can also be written by hand (design doc:
+`docs/design/contexts.md`); the study registry lives either in a top-level
+`studies:` block or per env at `s3://<metadata-bucket>/config/studies.yaml`.
 Search order: `./g3dt.yaml` → `~/.g3dt/g3dt.yaml` → `/etc/g3dt/g3dt.yaml`
-(the EC2 job box's copy, written by CDK user-data). Env vars override:
-`G3DT_PROJECT`, `AWS_REGION`, `G3DT_DEFAULT_ENV`.
+(the EC2 job box's copy, written by CDK user-data). Legacy markers
+(`project`/`default_env`/`profiles:` keys) keep working unchanged, as do the
+env-var overrides `G3DT_PROJECT`, `AWS_REGION`, `G3DT_DEFAULT_ENV` — that is
+the file-less CodeBuild/EC2 path.
 
 ## Quick start
 
 ```bash
-g3dt config envs                 # environments with a deployed SSM tree
-g3dt config show --env test      # every resolved name — the safety check
-g3dt ec2 up --env test           # start the env's job box (SSM-managed)
-g3dt metadata upload --study mystudy --env test --on ec2
+g3dt config show                 # every resolved name — the safety check
+g3dt ec2 up                      # start the context's job box (SSM-managed)
+g3dt metadata upload --study mystudy --on ec2
 g3dt jobs logs <run-id> --follow # live logs; laptop can sleep, job keeps going
-g3dt ec2 down --env test         # or let the auto-stop alarm handle it
+g3dt ec2 down                    # or let the auto-stop alarm handle it
 g3dt docs                        # the full operations overview
 ```
+
+(`--env <name>` still works everywhere and selects the matching context;
+CodeBuild's `g3dt config dbt-env --env $ENV` contract is unchanged.)
 
 ## How configuration works
 

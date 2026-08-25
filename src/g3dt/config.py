@@ -10,13 +10,16 @@ The platform has exactly two kinds of configuration:
   on deploy. The toolkit resolves everything from there at runtime
   (see :mod:`g3dt.resolver`).
 
-The only local configuration is a tiny bootstrap **marker** — ``g3dt.yaml`` —
-that tells the CLI which project/region to resolve (plus optional per-env AWS
-profile names and the study registry). Search order: ``./g3dt.yaml`` →
+The only local configuration is the **marker** — ``g3dt.yaml`` — which since
+3.8.0 stores named **contexts** (see :mod:`g3dt.contexts` and
+``docs/design/contexts.md``): each a (project, env, profile, region) tuple
+selected with ``g3dt config use``. Legacy markers (top-level
+``project``/``default_env``/``profiles:`` keys) keep working — contexts are
+synthesized from them in memory. Search order: ``./g3dt.yaml`` →
 ``~/.g3dt/g3dt.yaml`` → ``/etc/g3dt/g3dt.yaml`` (the EC2 job box's copy,
 written by CDK user-data). Environment variables override the file:
-``G3DT_PROJECT``, ``AWS_REGION``, ``G3DT_DEFAULT_ENV``; ``G3DT_MARKER`` points
-at an explicit marker path.
+``G3DT_PROJECT``, ``AWS_REGION``, ``G3DT_DEFAULT_ENV``, ``G3DT_CONTEXT``;
+``G3DT_MARKER`` points at an explicit marker path.
 
 Design notes
 ------------
