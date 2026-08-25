@@ -192,7 +192,10 @@ def test_require_project_without_marker_gives_setup_help(monkeypatch, tmp_path):
     monkeypatch.setenv("G3DT_MARKER", str(missing))
     with pytest.raises(config.ConfigError) as exc:
         config.require_project()
-    assert "g3dt config set project" in str(exc.value)
+    # Guidance changed in 3.8.0: contexts replace the deprecated
+    # `config set project` bootstrap (docs/design/contexts.md section 7).
+    assert "g3dt config use" in str(exc.value)
+    assert "G3DT_PROJECT" in str(exc.value)
 
 
 def test_env_vars_override_marker(monkeypatch, tmp_path):
