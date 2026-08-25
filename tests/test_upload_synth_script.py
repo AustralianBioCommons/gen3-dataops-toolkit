@@ -174,3 +174,135 @@ def test_main_submits_only_project_directories(monkeypatch, tmp_path):
     assert submitted == ["synthetic_dataset_1"]
     # The stub received the study's own folder as its base_dir, not the batch root.
     assert os.path.isdir(base / "synthetic_dataset_1")
+
+
+def test_main_projects_scopes_to_requested_dirs(monkeypatch, tmp_path, caplog):
+    """
+    Inputs:  a batch dir holding the two requested studies PLUS a stale
+             'synth50' directory left over from an earlier batch, and
+             --projects naming only the two studies.
+    Expected: only the requested studies are submitted, in the requested
+             order, and the stale directory is skipped with a log line.
+
+    Background (live incident): `g3dt synth deploy --studies s1,s2,s3` found
+    a stale 'synth50' dir from a previous run against a DIFFERENT commons.
+    It sorted first, 404'd ("Project synth50 not found"), and set -e killed
+    the deploy before any requested study uploaded. --projects is the fix:
+    the deploy flow now always passes its --studies here.
+    """
+    import logging
+
+    monkeypatch.chdir(tmp_path)
+    mod = _load_script()
+
+    base = tmp_path / "v1.3.0"
+    for d in ("study_b", "study_a", "synth50"):
+        (base / d).mkdir(parents=True)
+
+    submitted = []
+    monkeypatch.setattr(
+        mod,
+        "submit_synthetic_metadata",
+        lambda **kwargs: submitted.append(kwargs["project_id"]),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "upload_synth_metadata_sheepdog.py",
+            "--base-dir", str(base),
+            "--aws-secret-name", "secret",
+            "--projects", "study_a,study_b",
+        ],
+    )
+
+    with caplog.at_level(logging.INFO):
+        mod.main()
+
+    assert submitted == ["study_a", "study_b"]
+    assert "Skipping synth50 (not in --projects)" in caplog.text
+
+
+def test_main_projects_missing_dir_fails_before_any_submission(
+    monkeypatch, tmp_path
+):
+    """
+    Inputs:  --projects naming a study whose directory does not exist.
+    Expected: FileNotFoundError naming the missing directory BEFORE anything
+             is submitted — a wrong scope (typo, wrong version dir) must not
+             half-upload a batch.
+    """
+    import pytest
+
+    monkeypatch.chdir(tmp_path)
+    mod = _load_script()
+
+    base = tmp_path / "v1.3.0"
+    (base / "study_a").mkdir(parents=True)
+
+    submitted = []
+    monkeypatch.setattr(
+        mod,
+        "submit_synthetic_metadata",
+        lambda **kwargs: submitted.append(kwargs["project_id"]),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "upload_synth_metadata_sheepdog.py",
+            "--base-dir", str(base),
+            "--aws-secret-name", "secret",
+            "--projects", "study_a,nope",
+        ],
+    )
+
+    with pytest.raises(FileNotFoundError, match="nope"):
+        mod.main()
+    assert submitted == []
+
+
+def test_main_continues_past_a_failing_project_and_fails_at_end(
+    monkeypatch, tmp_path
+):
+    """
+    Inputs:  two study dirs; submission raises for the first one.
+    Expected: the second study is still submitted, then the script exits 1
+             naming the failed project.
+
+    Background: submissions run AFTER the (billable) LLM generation. With
+    the old fail-fast loop, one bad project threw away every healthy study's
+    upload; now healthy studies land first and only the re-run of the failed
+    one is needed.
+    """
+    import pytest
+
+    monkeypatch.chdir(tmp_path)
+    mod = _load_script()
+
+    base = tmp_path / "v1.3.0"
+    (base / "study_a").mkdir(parents=True)
+    (base / "study_b").mkdir(parents=True)
+
+    submitted = []
+
+    def _submit(**kwargs):
+        if kwargs["project_id"] == "study_a":
+            raise RuntimeError("404 Project study_a not found")
+        submitted.append(kwargs["project_id"])
+
+    monkeypatch.setattr(mod, "submit_synthetic_metadata", _submit)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "upload_synth_metadata_sheepdog.py",
+            "--base-dir", str(base),
+            "--aws-secret-name", "secret",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 1
+    assert submitted == ["study_b"]

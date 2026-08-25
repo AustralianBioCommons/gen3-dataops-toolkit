@@ -123,6 +123,14 @@ def main():
         default=DEFAULT_SUBMISSION_SIZE_KB,
         help="Maximum submission size in KB per chunk (default: 50)."
     )
+    parser.add_argument(
+        "--projects",
+        default=None,
+        help="Comma-separated project (study) directory names to upload. "
+             "Default: every subdirectory of --base-dir. The g3dt deploy "
+             "flow always passes the run's --studies here so a stale "
+             "directory from an earlier batch can never be picked up."
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -172,16 +180,60 @@ def main():
             % args.base_dir
         )
 
+    # Scope the upload to the requested projects. Without this, the script
+    # uploads whatever happens to be on disk: a stale 'synth50' directory
+    # left over from an earlier batch against a DIFFERENT commons sorted
+    # first, 404'd ("Project synth50 not found"), and aborted a whole
+    # deploy before any of the requested studies was submitted.
+    if args.projects:
+        requested = [p.strip() for p in args.projects.split(",") if p.strip()]
+        missing = [p for p in requested if p not in project_id_list]
+        if missing:
+            logger.error(
+                "Requested project directories not found under %s: %s "
+                "(available: %s)",
+                args.base_dir, missing, project_id_list,
+            )
+            raise FileNotFoundError(
+                "Requested project directories not found under %s: %s"
+                % (args.base_dir, missing)
+            )
+        for entry in project_id_list:
+            if entry not in requested:
+                logger.info("Skipping %s (not in --projects)", entry)
+        project_id_list = requested
+    else:
+        logger.info(
+            "No --projects given — uploading all %d project directories "
+            "found in %s.",
+            len(project_id_list), args.base_dir,
+        )
+
+    # One bad project must not abort the batch: submit every healthy
+    # project first, then fail (exit 1) naming the casualties, so a re-run
+    # after a fix is cheap.
+    failures = []
     for project_id in project_id_list:
         project_base_dir = os.path.join(args.base_dir, project_id)
-        submit_synthetic_metadata(
-            base_dir=project_base_dir,
-            project_id=project_id,
-            aws_secret_name=args.aws_secret_name,
-            aws_region=args.aws_region,
-            aws_profile=args.aws_profile,
-            max_submission_size_kb=args.submission_size_kb,
+        try:
+            submit_synthetic_metadata(
+                base_dir=project_base_dir,
+                project_id=project_id,
+                aws_secret_name=args.aws_secret_name,
+                aws_region=args.aws_region,
+                aws_profile=args.aws_profile,
+                max_submission_size_kb=args.submission_size_kb,
+            )
+        except Exception as exc:
+            logger.error("Submission failed for project %s: %s", project_id, exc)
+            failures.append((project_id, exc))
+
+    if failures:
+        logger.error(
+            "Finished with %d failed project(s): %s",
+            len(failures), ", ".join(p for p, _ in failures),
         )
+        raise SystemExit(1)
 
     logger.info("Script finished.")
 

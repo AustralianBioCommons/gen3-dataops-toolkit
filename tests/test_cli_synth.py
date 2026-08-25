@@ -312,18 +312,21 @@ def test_deploy_studies_and_counts_reach_the_script(mock_run, _env):
 
 @patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
 @patch("g3dt.cli._internal.runner.run")
-def test_deploy_without_batch_flags_leaves_script_defaults(mock_run, _env):
+def test_deploy_requires_studies(mock_run, _env):
     """
-    Inputs:  synth deploy with no batch flags
-    Expected Output: no G3DT_SYNTH_* vars are injected — the script falls back
-    to the documented ACDC demo defaults, exactly as before this change.
+    Inputs:  synth deploy with no --studies
+    Expected Output: a Typer usage error (exit 2) before anything runs.
+
+    Background: --studies used to default to a hardcoded ACDC demo set
+    (AusDiab_Simulated, ...), which was wrong for every other project — a
+    default-flag run on another commons would generate and upload four
+    studies that mean nothing there. The studies list also scopes deletion
+    and upload, so it must always be an explicit operator choice.
     """
     result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="y\n")
-    assert result.exit_code == 0, result.output
-    env = _deploy_env(mock_run)
-    for key in ("G3DT_SYNTH_STUDIES", "G3DT_SYNTH_NUM_RECORDS",
-                "G3DT_SYNTH_PREV_VERSION", "G3DT_SYNTH_SKIP_DELETE"):
-        assert key not in env
+    assert result.exit_code == 2
+    assert "--studies" in result.output
+    mock_run.assert_not_called()
 
 
 @patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
@@ -355,13 +358,17 @@ def test_deploy_skip_dict_reaches_the_script(mock_run, _env):
     flag the var is absent and the full flow runs.
     """
     result = runner.invoke(
-        app, ["synth", "deploy", "--env", "test", "--skip-dict"], input="y\n"
+        app,
+        ["synth", "deploy", "--env", "test", "--studies", "s1", "--skip-dict"],
+        input="y\n",
     )
     assert result.exit_code == 0, result.output
     assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DICT"] == "1"
 
     mock_run.reset_mock()
-    result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="y\n")
+    result = runner.invoke(
+        app, ["synth", "deploy", "--env", "test", "--studies", "s1"], input="y\n"
+    )
     assert result.exit_code == 0, result.output
     assert "G3DT_SYNTH_SKIP_DICT" not in _deploy_env(mock_run)
 
@@ -375,7 +382,9 @@ def test_deploy_prompts_before_deleting_previous_batch(mock_run, _env):
     flow still runs — deleting the previous batch is the one destructive step
     in the pipeline, so it is confirm-or-skip, never silent.
     """
-    result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="n\n")
+    result = runner.invoke(
+        app, ["synth", "deploy", "--env", "test", "--studies", "s1"], input="n\n"
+    )
     assert result.exit_code == 0, result.output
     assert "Delete the previous synthetic batch" in result.output
     assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DELETE"] == "1"
@@ -389,7 +398,10 @@ def test_deploy_skip_delete_flag_skips_without_prompting(mock_run, _env):
     Expected Output: no confirmation prompt at all and deletion skipped —
     the explicit flag is the non-interactive path.
     """
-    result = runner.invoke(app, ["synth", "deploy", "--env", "test", "--skip-delete"])
+    result = runner.invoke(
+        app,
+        ["synth", "deploy", "--env", "test", "--studies", "s1", "--skip-delete"],
+    )
     assert result.exit_code == 0, result.output
     assert "Delete the previous synthetic batch" not in result.output
     assert _deploy_env(mock_run)["G3DT_SYNTH_SKIP_DELETE"] == "1"
@@ -412,3 +424,39 @@ def test_install_simulator_upgrades_an_existing_install(mock_run):
     argv = list(mock_run.call_args_list[-1].args[0])
     assert "--upgrade" in argv
     assert "gen3-metadata-simulator" in argv
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_upload_studies_flag_passes_projects_to_script(mock_run, _env):
+    """
+    Inputs:  synth upload --studies a,b
+    Expected Output: the service script is invoked with --projects a,b, so
+    the upload is scoped to exactly those study directories.
+
+    Background: without scoping, the script uploads every subdirectory of
+    the batch dir. A live deploy picked up a stale 'synth50' directory from
+    an earlier run against a DIFFERENT commons; it 404'd and aborted the
+    whole batch. --studies is how an operator pins the upload to the run.
+    """
+    result = runner.invoke(
+        app, ["synth", "upload", "--env", "test", "--studies", "a,b"]
+    )
+    assert result.exit_code == 0, result.output
+    argv = [str(a) for a in mock_run.call_args[0][0]]
+    assert any("upload_synth_metadata_sheepdog.py" in a for a in argv)
+    assert argv[argv.index("--projects") + 1] == "a,b"
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_upload_without_studies_omits_projects(mock_run, _env):
+    """
+    Inputs:  synth upload with no --studies
+    Expected Output: no --projects flag — the script's upload-everything
+    default stands (unchanged 3.8.x behavior for the standalone command).
+    """
+    result = runner.invoke(app, ["synth", "upload", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    argv = [str(a) for a in mock_run.call_args[0][0]]
+    assert "--projects" not in argv

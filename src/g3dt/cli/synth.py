@@ -51,15 +51,8 @@ app = typer.Typer(
 
 SYNTH_DIR = Path("~/.g3dt/synth_metadata").expanduser()
 
-#: Defaults for the full-deploy flow, kept for continuity with the original
-#: ACDC demo environment. Any other project should pass --studies (and
-#: --num-records) — there is no SSM fact for these because simulated study
-#: sets are batch inputs, not environment facts.
-DEPLOY_DEFAULT_STUDIES = (
-    "AusDiab_Simulated,Baker-Biobank_Simulated,"
-    "BioHeart-CT_Simulated,CAUGHT-CAD_Simulated"
-)
-DEPLOY_DEFAULT_NUM_RECORDS = "30,60,20,55"
+#: Simulated study sets are batch inputs, not environment facts — there is
+#: no SSM fact for them, so --studies is required on the full-deploy flow.
 DEPLOY_DEFAULT_PREV_VERSION = "v1.0.0"
 
 
@@ -210,17 +203,17 @@ def deploy(
         None, "--etl-cronjob",
         help="ETL cronjob name; default: the env's SSM app/etl_cronjob.",
     ),
-    studies: Optional[str] = typer.Option(
-        None, "--studies",
-        help="Simulated study id(s), comma-separated. These are (re)generated, "
-        "uploaded, and their previous batch deleted. Default: the original "
-        f"demo set ({DEPLOY_DEFAULT_STUDIES}).",
+    studies: str = typer.Option(
+        ..., "--studies",
+        help="Simulated study id(s), comma-separated (required). These are "
+        "(re)generated, uploaded, and their previous batch deleted — the "
+        "whole run is scoped to exactly this list. "
+        "Example: --studies 'synthetic_dataset_1,synthetic_dataset_2'.",
     ),
     num_records: Optional[str] = typer.Option(
         None, "--num-records", "-n",
         help="Records per study: one number for all, or a comma list (one per "
-        "study). Default: 30 per study (or the classic 30,60,20,55 when "
-        "--studies is not given).",
+        "study). Default: 30 per study.",
     ),
     prev_version: Optional[str] = typer.Option(
         None, "--prev-version",
@@ -265,8 +258,8 @@ def deploy(
 
     Provider/model, restart targets, and the ETL cronjob come from the env's
     SSM tree unless overridden; the API key path comes from
-    --llm-api-key-file or the marker. Studies and record counts are batch
-    inputs with ACDC-era defaults — any other project should pass --studies.
+    --llm-api-key-file or the marker. Studies are a required batch input:
+    deletion, generation and upload are all scoped to exactly that list.
 
     Examples:
       g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100
@@ -283,14 +276,13 @@ def deploy(
     env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic full deploy", env)
-    effective_studies = studies or DEPLOY_DEFAULT_STUDIES
-    _check_per_study_counts(effective_studies, num_records)
+    _check_per_study_counts(studies, num_records)
     if not skip_delete:
         # Deleting the previous batch is the one destructive step in the
         # flow; declining just skips it — everything else still runs.
         effective_prev = prev_version or DEPLOY_DEFAULT_PREV_VERSION
         skip_delete = not typer.confirm(
-            f"Delete the previous synthetic batch ({effective_studies} @ "
+            f"Delete the previous synthetic batch ({studies} @ "
             f"{effective_prev}) from the commons before uploading the new one?",
             default=True,
         )
@@ -300,8 +292,7 @@ def deploy(
         env_vars["G3DT_RESTART_SERVICES"] = restart_services
     if etl_cronjob:
         env_vars["G3DT_ETL_CRONJOB"] = etl_cronjob
-    if studies:
-        env_vars["G3DT_SYNTH_STUDIES"] = studies
+    env_vars["G3DT_SYNTH_STUDIES"] = studies
     if num_records:
         env_vars["G3DT_SYNTH_NUM_RECORDS"] = num_records
     if prev_version:
@@ -460,6 +451,12 @@ def upload(
         "--allow-version-mismatch",
         help="Upload even if the batch was generated against another dictionary.",
     ),
+    studies: Optional[str] = typer.Option(
+        None, "--studies",
+        help="Comma-separated study directory names to upload. Default: every "
+        "study directory in the batch. Directories not listed are skipped "
+        "with a log line — pass this to keep stale batches out of the upload.",
+    ),
 ) -> None:
     """Upload generated synthetic metadata to Gen3 (reads local files).
 
@@ -467,6 +464,10 @@ def upload(
     synthetic records are only schema-valid against the dictionary that produced
     them. Defaults to the env's declared version, so the common case verifies
     against what the environment actually runs.
+
+    With --studies, the upload is scoped to exactly those study directories;
+    anything else sitting in the batch directory (e.g. a leftover from an
+    earlier run) is skipped and logged, never submitted.
     """
     if env is None:
         try:
@@ -485,6 +486,8 @@ def upload(
     _check_batch_matches_env(SYNTH_DIR / v, e, v, allow_version_mismatch)
     base_dir = str(SYNTH_DIR / v) + "/"
     args = ["--base-dir", base_dir, "--aws-secret-name", e.aws_secret_name]
+    if studies:
+        args += ["--projects", studies]
     if e.aws_profile:
         args += ["--aws-profile", e.aws_profile]
     runner.run(

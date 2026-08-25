@@ -43,16 +43,11 @@ ARGO_SCRIPT_DIR="${SERVICE_DIR}/k8s_ops"
 SCHEMA_DIR="${G3DT_SCHEMA_DIR:-$HOME/.g3dt/schemas}"
 SYNTH_BASE="${G3DT_SYNTH_DIR:-$HOME/.g3dt/synth_metadata}"
 
-# Batch inputs (set by `g3dt synth deploy --studies/--num-records/--prev-version`;
-# the fallbacks are the original ACDC demo values, kept for continuity).
-STUDIES="${G3DT_SYNTH_STUDIES:-AusDiab_Simulated,Baker-Biobank_Simulated,BioHeart-CT_Simulated,CAUGHT-CAD_Simulated}"
-if [ -n "${G3DT_SYNTH_NUM_RECORDS:-}" ]; then
-    NUM_RECORDS="${G3DT_SYNTH_NUM_RECORDS}"
-elif [ -n "${G3DT_SYNTH_STUDIES:-}" ]; then
-    NUM_RECORDS="30"          # custom studies, no counts given: 30 per study
-else
-    NUM_RECORDS="30,60,20,55" # the classic per-study counts for the demo set
-fi
+# Batch inputs (set by `g3dt synth deploy --studies/--num-records/--prev-version`).
+# The studies list is required: it scopes deletion, generation AND upload, so
+# a run can never touch batches it was not asked about.
+STUDIES="${G3DT_SYNTH_STUDIES:?G3DT_SYNTH_STUDIES not set — run via the g3dt CLI (--studies is required)}"
+NUM_RECORDS="${G3DT_SYNTH_NUM_RECORDS:-30}"
 PREV_VERSION="${G3DT_SYNTH_PREV_VERSION:-v1.0.0}"
 
 # Derived variables
@@ -94,7 +89,7 @@ if [ -z "${G3DT_SYNTH_SKIP_DICT:-}" ]; then
     if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
         UPLOAD_DICT_ARGS+=("${G3DT_AWS_PROFILE}")
     fi
-    python3 "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${UPLOAD_DICT_ARGS[@]}"
+    "${G3DT_PYTHON:-python3}" "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${UPLOAD_DICT_ARGS[@]}"
 
     echo "==== [3] Restarting microservices (schema) ===="
     bash "${ARGO_SCRIPT_DIR}/argocd_restart_schema.sh" \
@@ -129,7 +124,7 @@ else
     if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
         DELETE_SYNTH_ARGS+=(-profile "${G3DT_AWS_PROFILE}")
     fi
-    python3 "${SERVICE_DIR}/synthetic_data/delete_synth_metadata_sheepdog.py" "${DELETE_SYNTH_ARGS[@]}"
+    "${G3DT_PYTHON:-python3}" "${SERVICE_DIR}/synthetic_data/delete_synth_metadata_sheepdog.py" "${DELETE_SYNTH_ARGS[@]}"
 fi
 
 echo "==== [5] Generating new synthetic data (${STUDIES}) for version ${VERSION} (LLM-realistic) ===="
@@ -142,14 +137,17 @@ bash "${SERVICE_DIR}/synthetic_data/generate_synth_metadata.sh" \
     --output-root "${SYNTH_BASE}"
 
 echo "==== [6] Uploading new synthetic data for version ${VERSION} ===="
+# --projects scopes the upload to this run's studies: stale directories from
+# earlier batches under the same version dir are skipped, never submitted.
 UPLOAD_SYNTH_ARGS=(
     --base-dir "${SYNTH_META_DIR}"
     --aws-secret-name "${AWS_SECRET_NAME}"
+    --projects "${STUDIES}"
 )
 if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
     UPLOAD_SYNTH_ARGS+=(--aws-profile "${G3DT_AWS_PROFILE}")
 fi
-python3 "${SERVICE_DIR}/synthetic_data/upload_synth_metadata_sheepdog.py" "${UPLOAD_SYNTH_ARGS[@]}"
+"${G3DT_PYTHON:-python3}" "${SERVICE_DIR}/synthetic_data/upload_synth_metadata_sheepdog.py" "${UPLOAD_SYNTH_ARGS[@]}"
 
 echo "==== [7] Restarting microservices (schema and etl) ===="
 bash "${ARGO_SCRIPT_DIR}/argocd_restart_etl.sh" \

@@ -58,7 +58,9 @@ def test_synth_deploy_staging_runs_without_prompt(mock_run, _env):
     # this stays a pure test of the prod gate: staging must not require the
     # typed environment confirmation.
     result = runner.invoke(
-        app, ["synth", "deploy", "--env", "staging", "--skip-delete"]
+        app,
+        ["synth", "deploy", "--env", "staging", "--studies", "s1",
+         "--skip-delete"],
     )
     assert result.exit_code == 0, result.output
     mock_run.assert_called_once()
@@ -71,7 +73,9 @@ def test_synth_deploy_prod_aborts_without_typed_confirmation(mock_run, _env):
     Inputs:  g3dt synth deploy --env prod   (empty confirmation)
     Expected Output: exit code 1 and the deploy never runs.
     """
-    result = runner.invoke(app, ["synth", "deploy", "--env", "prod"], input="\n")
+    result = runner.invoke(
+        app, ["synth", "deploy", "--env", "prod", "--studies", "s1"], input="\n"
+    )
     assert result.exit_code == 1
     mock_run.assert_not_called()
 

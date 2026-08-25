@@ -62,7 +62,7 @@ echo "==== [1] Pulling dictionary for version ${VERSION} ===="
 bash "${SERVICE_DIR}/dictionary/pull_dict.sh" "${DICT_URL}" "${DICT_FILENAME}"
 
 echo "==== [2] Uploading dictionary to S3: s3://${SCHEMA_S3_URI} ===="
-python3 "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${SCHEMA_DIR}/${DICT_FILENAME}" "s3://${SCHEMA_S3_URI}"
+"${G3DT_PYTHON:-python3}" "${SERVICE_DIR}/dictionary/upload_dictionary.py" "${SCHEMA_DIR}/${DICT_FILENAME}" "s3://${SCHEMA_S3_URI}"
 
 echo "==== [3] Restarting microservices (schema) ===="
 bash "${ARGO_SCRIPT_DIR}/argocd_restart_schema.sh" -d "${DOMAIN}" -a "${APP_NAME}" -n "${NAMESPACE}"

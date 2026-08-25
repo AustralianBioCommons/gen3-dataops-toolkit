@@ -138,11 +138,11 @@ for i in "${!STUDY_NAMES[@]}"; do
     echo "--------------------------------------------"
 
     if [[ "$study_version_lc" == "all" ]]; then
-        CMD=(python3 "${SCRIPT_DIR}/delete_all_metadata_for_project.py"
+        CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_all_metadata_for_project.py"
              --study "$study" --env "$ENV")
         [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     else
-        CMD=(python3 "${SCRIPT_DIR}/delete_metadata_by_guid.py"
+        CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_metadata_by_guid.py"
              --study "$study" --env "$ENV" --version "$study_version" --skip-if-empty)
         [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     fi
