@@ -29,7 +29,13 @@ from g3dt.cli._internal.resolve import env_of, study_of
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Contexts (use/discover/contexts), plus the resolved SSM settings.",
+    help="Contexts and resolved settings.\n\n"
+         "A context is a named (project, env, AWS profile, region) tuple "
+         "stored in the local g3dt.yaml marker. Every command acts on the "
+         "current context — switch with 'g3dt config use <name>', one-shot "
+         "with --ctx. Discovery scans one SSO profile's AWS account at a "
+         "time ('g3dt config discover <profile>'). Run 'g3dt docs' for the "
+         "full model.",
 )
 
 
@@ -273,28 +279,24 @@ def discover(
         False, "--add", help="Register discovered pairs as contexts."
     ),
     profile: List[str] = typer.Option(
-        [], "--profile", help="Restrict --all-profiles to these profiles."
+        [], "--profile", hidden=True,
+        help="(Deprecated) Restrict --all-profiles to these profiles.",
     ),
     region: str = typer.Option(
         None, "--region", help="Region for profiles that configure none."
     ),
 ) -> None:
-    """Find deployable infrastructure.
+    """Scan an AWS profile's account for deployed environments (register with --add).
 
-    With a PROFILE argument: log that one profile in if needed, then list
-    every deployed environment its account holds — the recommended flow.
-    With --all-profiles: sweep every configured profile (stale sessions are
-    skipped). With neither: verify each already-configured context against
-    its own account. Add --add to register findings as contexts.
+    Discovery works one AWS account at a time, through one SSO profile:
+    'g3dt config discover <profile>' checks that profile's session, offers
+    'aws sso login' if it is stale, then lists every deployed environment
+    the account holds — the recommended flow. --all-profiles sweeps every
+    configured profile instead (stale sessions are skipped, not logged in).
+    Run with no arguments to see your profiles and this model. To check
+    contexts you already registered: 'g3dt config contexts --verify'.
     """
     resolve.announce_context()
-    # The scan probes credentials that may be stale; botocore logs its own
-    # WARNING tracebacks for failed SSO refreshes, which would drown the
-    # per-profile "skipped (run: aws sso login ...)" lines this command
-    # prints deliberately. Quiet botocore for the duration.
-    import logging
-
-    logging.getLogger("botocore").setLevel(logging.ERROR)
     marker = config.load_marker()
     default_region = region or marker.get("region") or config.DEFAULT_REGION
 
@@ -302,33 +304,62 @@ def discover(
         typer.secho("Pass either a PROFILE argument or --all-profiles, not both.",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
-
-    if not profile_arg and not all_profiles:
-        ctxs = contexts.list_contexts(marker)
-        if not ctxs:
-            typer.secho(
-                "No contexts configured to verify. Try "
-                "`g3dt config discover <aws-profile> --add`.",
-                fg=typer.colors.YELLOW,
-            )
-            return
-        for ctx in ctxs.values():
-            state = _deployed_version(ctx)
-            if state.startswith("✓"):
-                label, color = f"OK ({state[2:]})", typer.colors.GREEN
-            elif state == "—":
-                label, color = "NOT DEPLOYED", typer.colors.YELLOW
-            else:
-                label, color = (
-                    f"AUTH FAILED (try: aws sso login --profile {ctx.profile})",
-                    typer.colors.RED,
-                )
-            typer.secho(f"  {ctx.name:<24} {label}", fg=color)
-        return
+    if profile and profile_arg:
+        typer.secho(
+            "Pass either a PROFILE argument or --profile, not both "
+            "(--profile is deprecated).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    if profile and not all_profiles:
+        typer.secho(
+            "--profile is deprecated and only valid with --all-profiles; "
+            "run 'g3dt config discover <profile>' instead.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    if profile:
+        typer.secho(
+            "--profile is deprecated and will be removed in the next major "
+            "release; run 'g3dt config discover <profile>' per profile "
+            "instead.",
+            fg=typer.colors.YELLOW, err=True,
+        )
 
     import botocore.session
 
     profiles_cfg = botocore.session.Session().full_config.get("profiles", {})
+
+    if not profile_arg and not all_profiles:
+        # Guidance mode: no network — explain the model and show what is
+        # available locally, so a first run of the bare command teaches the
+        # flow instead of surprising the operator with live AWS calls.
+        typer.echo(
+            "Discovery scans one AWS account at a time, through one SSO "
+            "profile:"
+        )
+        typer.echo("    g3dt config discover <profile> [--add]")
+        if profiles_cfg:
+            typer.echo(
+                f"Profiles in ~/.aws/config: {', '.join(sorted(profiles_cfg))}"
+            )
+        else:
+            typer.secho(
+                "No profiles found in ~/.aws/config — configure AWS SSO "
+                "first (aws configure sso).",
+                fg=typer.colors.YELLOW,
+            )
+        typer.echo(
+            "Sweep every profile with --all-profiles (stale SSO sessions "
+            "are skipped)."
+        )
+        typer.echo(
+            "To check contexts you already registered: "
+            "g3dt config contexts --verify"
+        )
+        return
+
+    from g3dt.cli._internal.aws_quiet import quiet_botocore
 
     if profile_arg:
         if profile_arg not in profiles_cfg:
@@ -338,7 +369,9 @@ def discover(
                 fg=typer.colors.RED, err=True,
             )
             raise typer.Exit(1)
-        if not _profile_session_valid(profile_arg):
+        with quiet_botocore():
+            session_ok = _profile_session_valid(profile_arg)
+        if not session_ok:
             typer.secho(
                 f"The SSO session for '{profile_arg}' is not valid.",
                 fg=typer.colors.YELLOW,
@@ -355,7 +388,9 @@ def discover(
             login = subprocess.run(
                 ["aws", "sso", "login", "--profile", profile_arg]
             )
-            if login.returncode != 0 or not _profile_session_valid(profile_arg):
+            with quiet_botocore():
+                session_ok = _profile_session_valid(profile_arg)
+            if login.returncode != 0 or not session_ok:
                 typer.secho(
                     f"Still no valid session for '{profile_arg}'. Aborting.",
                     fg=typer.colors.RED, err=True,
@@ -375,7 +410,8 @@ def discover(
         prof_region = (profiles_cfg.get(prof, {}).get("region")
                        or default_region)
         try:
-            pairs = _scan_profile(prof, prof_region)
+            with quiet_botocore():
+                pairs = _scan_profile(prof, prof_region)
         except Exception as exc:
             typer.secho(
                 f"  {prof}: skipped ({type(exc).__name__} — "

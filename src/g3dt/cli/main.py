@@ -24,7 +24,9 @@ from g3dt.cli import (
 app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
-    help="Gen3 DataOps toolkit. Run [bold]g3dt docs[/bold] for an overview.",
+    help="Gen3 DataOps toolkit. Commands act on the current [bold]context[/bold] "
+         "— a named (project, env, AWS profile, region) tuple; see "
+         "[bold]g3dt config[/bold]. Run [bold]g3dt docs[/bold] for an overview.",
 )
 
 

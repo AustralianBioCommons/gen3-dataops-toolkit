@@ -174,20 +174,50 @@ def test_add_and_forget_roundtrip(_clean):
     assert result.exit_code == 1  # current context needs --force
 
 
-def test_discover_default_verifies_only_configured_contexts(_clean):
+def test_discover_no_args_prints_guidance_not_verification(_clean):
     """
-    Default discover mode touches ONLY configured contexts (one SSM head
-    each) — never scans profiles. We stub the head to prove each context is
-    checked and nothing else happens.
+    Bare `g3dt config discover` teaches the flow instead of touching AWS.
+
+    Background (user feedback on 3.8.1): the old no-arg mode silently
+    VERIFIED every configured context (one SSM head each) — surprising for a
+    command named "discover", slow, and traceback-prone with stale SSO
+    sessions. Discovery works one account at a time, so the bare command now
+    prints the model plus the locally configured profiles and exits without
+    any network call; verification lives in `config contexts --verify`.
     """
     _write(_clean, V2)
-    with patch("g3dt.cli.config_cmds._deployed_version") as head:
-        head.side_effect = ["✓ 3.8.0", "—"]
+    profiles = {"p_one": {}, "p_two": {}}
+    with patch("botocore.session.Session") as sess, \
+         patch("g3dt.cli.config_cmds._deployed_version") as head, \
+         patch("g3dt.cli.config_cmds._scan_profile") as scan:
+        sess.return_value.full_config = {"profiles": profiles}
         result = runner.invoke(app, ["config", "discover"])
     assert result.exit_code == 0
-    assert head.call_count == 2
-    assert "OK (3.8.0)" in result.output
-    assert "NOT DEPLOYED" in result.output
+    head.assert_not_called()
+    scan.assert_not_called()
+    assert "one AWS account at a time" in result.output
+    assert "p_one" in result.output and "p_two" in result.output
+    assert "config contexts --verify" in result.output
+
+
+def test_discover_rejects_profile_option_with_positional(_clean):
+    """
+    `discover <profile>` (positional) and the deprecated repeatable
+    `--profile` option are two spellings of "which profile" with different
+    semantics; combining them is ambiguous and must be refused loudly
+    rather than silently preferring one.
+    """
+    _write(_clean, "region: ap-southeast-2\n")
+    result = runner.invoke(
+        app, ["config", "discover", "p_one", "--profile", "p_two"]
+    )
+    assert result.exit_code == 1
+    assert "not both" in result.output
+
+    # --profile without --all-profiles was previously ignored silently.
+    result = runner.invoke(app, ["config", "discover", "--profile", "p_two"])
+    assert result.exit_code == 1
+    assert "deprecated" in result.output
 
 
 def test_discover_all_profiles_scans_and_add_registers(_clean):
