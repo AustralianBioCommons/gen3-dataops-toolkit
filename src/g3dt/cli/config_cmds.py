@@ -249,6 +249,13 @@ def discover(
     them as contexts.
     """
     resolve.announce_context()
+    # The scan probes credentials that may be stale; botocore logs its own
+    # WARNING tracebacks for failed SSO refreshes, which would drown the
+    # per-profile "skipped (run: aws sso login ...)" lines this command
+    # prints deliberately. Quiet botocore for the duration.
+    import logging
+
+    logging.getLogger("botocore").setLevel(logging.ERROR)
     marker = config.load_marker()
     default_region = region or marker.get("region") or config.DEFAULT_REGION
 
