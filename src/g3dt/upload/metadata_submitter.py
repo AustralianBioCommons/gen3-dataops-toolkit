@@ -866,8 +866,27 @@ class MetadataSubmitter:
             athena_s3_output (str): S3 path for Athena query results output.
             workgroup (str): Athena workgroup to use.
             table_location (str): S3 location for the Iceberg table.
+
+        Raises:
+            RuntimeError: Immediately (no retries) when there are no
+                submission results to record — retrying an empty receipts
+                write can never succeed and its terminal error
+                ("DataFrame cannot be empty" after N attempts) buries the
+                real cause, which is whatever made every chunk fail
+                (observed live: sheepdog 403s on acdc/staging).
         """
-        
+
+        if not submission_results:
+            msg = (
+                "No submission results to record: 0 entities were accepted by "
+                "sheepdog, so the receipts write is skipped. The real cause is "
+                "whatever failed the submission chunks — see the "
+                "[SUBMIT]/[RETRY] errors above (e.g. 403 authorization "
+                "failures)."
+            )
+            logger.critical(msg)
+            raise RuntimeError(msg)
+
         @retry(
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential(multiplier=1, max=10)

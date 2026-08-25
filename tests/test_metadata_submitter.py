@@ -270,8 +270,11 @@ def test_upload_submission_results_max_retries_exceeded(submitter_instance):
         mock_write.side_effect = Exception("Fail")
         submitter_instance.max_retries = 2
 
+        # A NON-empty payload: an empty list now short-circuits before the
+        # retry loop (see the empty-results guard test below), so the retry
+        # mechanics must be exercised with a failing WRITE, not empty input.
         with pytest.raises(Exception):
-            submitter_instance._upload_submission_results([])
+            submitter_instance._upload_submission_results([{"p": 1}])
         
         # Verify retries happened (Initial attempt + Retries)
         assert mock_write.call_count >= 2
@@ -515,3 +518,31 @@ def test_fetch_prior_uploads_treats_a_missing_table_as_first_upload():
 
     assert result.empty
     assert list(result.columns) == ["project_id", "version"]
+
+
+# ==========================================
+# Empty-results guard (regression, issue #14)
+# ==========================================
+
+def test_upload_submission_results_empty_raises_without_receipts_write(submitter_instance):
+    """
+    An upload where EVERY chunk failed must fail loudly at the receipts step,
+    not by retrying an impossible empty write.
+
+    Background: when sheepdog rejects every submission chunk (observed live on
+    acdc/staging as HTTP 403 authorization failures), the collected
+    submission_results list is empty. Before this guard, the receipts writer
+    entered its tenacity retry loop, failed three times on "DataFrame cannot
+    be empty", and the terminal RetryError buried the real cause — an operator
+    reading the tail of the log saw a receipts problem, not an authorization
+    problem.
+
+    Input:    submission_results = []  (the all-chunks-failed shape)
+    Expected: RuntimeError raised immediately, its message pointing back at
+              the per-chunk [SUBMIT]/[RETRY] errors; the Iceberg receipts
+              writer is never invoked.
+    """
+    with patch.object(metadata_submitter, "write_iceberg_to_db") as mock_write:
+        with pytest.raises(RuntimeError, match=r"No submission results to record"):
+            submitter_instance._upload_submission_results([])
+    mock_write.assert_not_called()
