@@ -102,7 +102,11 @@ for study in "${STUDY_LIST[@]}"; do
 
     UPLOAD_ARGS=(--study "$study" --env "$ENV")
     [[ "$FORCE_REUPLOAD" == "true" ]] && UPLOAD_ARGS+=(--force-reupload)
-    if python3 "${SCRIPT_DIR}/upload_metadata.py" "${UPLOAD_ARGS[@]}"; then
+    # G3DT_PYTHON is exported by the g3dt CLI (runner.bash_script): the
+    # interpreter that owns this g3dt installation. A bare python3 is NOT
+    # guaranteed to be it (AL2023 defaults python3 to 3.9; g3dt installs
+    # under 3.11) and fails with ModuleNotFoundError: No module named 'g3dt'.
+    if "${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/upload_metadata.py" "${UPLOAD_ARGS[@]}"; then
         echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Completed successfully: ${study}"
     else
         EXIT_CODE=$?

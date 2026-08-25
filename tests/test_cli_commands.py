@@ -99,6 +99,11 @@ def test_dict_deploy_wraps_bash_script(mock_run, _env):
     result = runner.invoke(app, ["dict", "deploy", "--env", "test"])
     assert result.exit_code == 0, result.output
     argv = _argv(mock_run)
+    # bash_script prefixes the argv with an env assignment carrying the
+    # CLI's own interpreter (G3DT_PYTHON) for scripts that shell back
+    # into packaged Python services; strip it before the bash assertions.
+    assert argv[0] == "env" and argv[1].startswith("G3DT_PYTHON=")
+    argv = argv[2:]
     assert argv[0] == "bash"
     assert argv[1].endswith("services/dictionary/deploy_dd.sh")
     assert argv[2] == "test"
@@ -126,6 +131,11 @@ def test_dict_pull_passes_config_url_and_filename(mock_run, _env):
     result = runner.invoke(app, ["dict", "pull", "--env", "test"])
     assert result.exit_code == 0, result.output
     argv = _argv(mock_run)
+    # bash_script prefixes the argv with an env assignment carrying the
+    # CLI's own interpreter (G3DT_PYTHON) for scripts that shell back
+    # into packaged Python services; strip it before the bash assertions.
+    assert argv[0] == "env" and argv[1].startswith("G3DT_PYTHON=")
+    argv = argv[2:]
     assert argv[0] == "bash"
     assert argv[1].endswith("services/dictionary/pull_dict.sh")
     assert argv[2] == dictionary_url(_env_cfg("test"))
@@ -171,6 +181,11 @@ def test_metadata_upload_all_resolves_each_study(mock_run, _study, _env):
     )
     assert result.exit_code == 0, result.output
     argv = _argv(mock_run)
+    # bash_script prefixes the argv with an env assignment carrying the
+    # CLI's own interpreter (G3DT_PYTHON) for scripts that shell back
+    # into packaged Python services; strip it before the bash assertions.
+    assert argv[0] == "env" and argv[1].startswith("G3DT_PYTHON=")
+    argv = argv[2:]
     assert argv[0] == "bash"
     i = argv.index("--studies")
     assert argv[i + 1] == "ausdiab_staging,caughtcad_staging"
@@ -346,6 +361,11 @@ def test_delete_metadata_specific_version_builds_argv(mock_run, _study, _env):
     )
     assert result.exit_code == 0, result.output
     argv = _argv(mock_run)
+    # bash_script prefixes the argv with an env assignment carrying the
+    # CLI's own interpreter (G3DT_PYTHON) for scripts that shell back
+    # into packaged Python services; strip it before the bash assertions.
+    assert argv[0] == "env" and argv[1].startswith("G3DT_PYTHON=")
+    argv = argv[2:]
     assert argv[0] == "bash"
     assert argv[1].endswith("services/delete/delete_metadata.sh")
     i = argv.index("--studies")
@@ -372,6 +392,11 @@ def test_delete_metadata_all_versions_passes_all(mock_run, _study, _env):
     )
     assert result.exit_code == 0, result.output
     argv = _argv(mock_run)
+    # bash_script prefixes the argv with an env assignment carrying the
+    # CLI's own interpreter (G3DT_PYTHON) for scripts that shell back
+    # into packaged Python services; strip it before the bash assertions.
+    assert argv[0] == "env" and argv[1].startswith("G3DT_PYTHON=")
+    argv = argv[2:]
     assert argv[0] == "bash"
     assert argv[1].endswith("services/delete/delete_metadata.sh")
     j = argv.index("--version")
@@ -563,6 +588,11 @@ def test_k8s_restart_schema_passes_env_argo_args(mock_run, _env):
     result = runner.invoke(app, ["k8s", "restart-schema", "--env", "test"])
     assert result.exit_code == 0, result.output
     argv = _argv(mock_run)
+    # bash_script prefixes the argv with an env assignment carrying the
+    # CLI's own interpreter (G3DT_PYTHON) for scripts that shell back
+    # into packaged Python services; strip it before the bash assertions.
+    assert argv[0] == "env" and argv[1].startswith("G3DT_PYTHON=")
+    argv = argv[2:]
     assert argv[0] == "bash"
     assert argv[1].endswith("services/k8s_ops/argocd_restart_schema.sh")
     assert "-d" in argv and "-a" in argv and "-n" in argv

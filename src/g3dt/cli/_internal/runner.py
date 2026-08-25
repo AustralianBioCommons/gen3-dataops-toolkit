@@ -38,8 +38,20 @@ def python_script(relpath: str, *args: str) -> List[str]:
 
 
 def bash_script(relpath: str, *args: str) -> List[str]:
-    """Build an argv that runs a packaged shell script via bash."""
-    return ["bash", str(package_path(relpath)), *[str(a) for a in args]]
+    """Build an argv that runs a packaged shell script via bash.
+
+    The CLI's own interpreter is passed through as ``G3DT_PYTHON`` (via an
+    ``env`` prefix, so no process-global mutation) because wrapped scripts
+    that shell back into packaged Python services must use the interpreter
+    that owns this g3dt installation. A bare ``python3`` is NOT that on
+    Amazon Linux 2023, where the system default is 3.9 but g3dt is installed
+    under 3.11 — observed live on acdc/staging as ``ModuleNotFoundError:
+    No module named 'g3dt'`` from every study in an upload-all run.
+    """
+    return [
+        "env", f"G3DT_PYTHON={sys.executable}",
+        "bash", str(package_path(relpath)), *[str(a) for a in args],
+    ]
 
 
 def run(
