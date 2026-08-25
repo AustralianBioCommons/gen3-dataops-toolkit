@@ -157,16 +157,32 @@ def load_marker() -> dict:
 
 
 def require_project(marker: Optional[dict] = None) -> str:
-    """Return the project id or fail with setup instructions."""
+    """Return the project id or fail with setup instructions.
+
+    The active context's project wins; the marker's top-level ``project`` (or
+    ``$G3DT_PROJECT``) is the legacy/file-less fallback — in legacy mode the
+    two agree by construction.
+    """
     m = marker if marker is not None else load_marker()
+    from g3dt import contexts as _contexts  # lazy: avoids import cycle
+
+    act = _contexts.active()
+    if act is not None:
+        return act.project
+    if m.get("contexts"):
+        current = _contexts.current_context_name(m)
+        if current:
+            return _contexts.list_contexts(m)[current].project
     project = m.get("project")
     if not project:
         raise ConfigError(
-            "No project configured. Create a g3dt.yaml marker (searched: "
-            f"{', '.join(MARKER_PATHS)}) with at least:\n"
+            "No project configured. Register a context with "
+            "`g3dt config discover --all-profiles --add` and select it with "
+            "`g3dt config use <name>` — or create a g3dt.yaml marker "
+            f"(searched: {', '.join(MARKER_PATHS)}) with at least:\n"
             "    project: <projectId>\n"
             "    region: ap-southeast-2\n"
-            "or set $G3DT_PROJECT. Run `g3dt config set project <id>` to write one."
+            "or set $G3DT_PROJECT."
         )
     return project
 
@@ -215,6 +231,107 @@ def set_marker_value(key: str, value: str) -> Tuple[Optional[str], str, Path]:
     return old, value, path
 
 
+def _marker_write_path() -> Path:
+    """The marker file to write to: the existing one, else ``~/.g3dt/g3dt.yaml``."""
+    path = marker_path()
+    return path if path is not None else Path("~/.g3dt/g3dt.yaml").expanduser()
+
+
+def _rewrite_marker(data: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    _load_yaml_cached.cache_clear()
+
+
+def upsert_contexts(ctxs, set_current: Optional[str] = None) -> Tuple[Path, list, list]:
+    """Write contexts into the marker; never overwrite an existing name.
+
+    Every pre-existing key (v1 ``project``/``region``/``default_env``/
+    ``profiles``/``studies``/...) is preserved so an older toolkit reading the
+    same file keeps working. Returns ``(path, added_names, skipped_names)``.
+    """
+    path = _marker_write_path()
+    data = dict(_load_yaml_cached(str(path))) if path.is_file() else {}
+    existing = data.get("contexts") or {}
+    added, skipped = [], []
+    for ctx in ctxs:
+        if ctx.name in existing:
+            skipped.append(ctx.name)
+            continue
+        spec = {"project": ctx.project, "env": ctx.env}
+        if ctx.profile:
+            spec["profile"] = ctx.profile
+        if ctx.region:
+            spec["region"] = ctx.region
+        if ctx.production:
+            spec["production"] = True
+        existing[ctx.name] = spec
+        added.append(ctx.name)
+    data["contexts"] = existing
+    if set_current and set_current in existing:
+        data["current"] = set_current
+        spec = existing[set_current]
+        if data.get("project") in (None, spec["project"]):
+            data["default_env"] = spec["env"]
+    _rewrite_marker(data, path)
+    return path, added, skipped
+
+
+def set_current_context(name: str) -> Path:
+    """Point ``current:`` at a configured context (the `config use` writer).
+
+    Also syncs the legacy ``default_env`` key (older-toolkit goodwill) when the
+    marker's top-level project matches the context's project.
+    """
+    from g3dt import contexts as _contexts  # lazy: avoids import cycle
+
+    marker = load_marker()
+    ctxs = _contexts.list_contexts(marker)
+    if name not in ctxs:
+        raise ConfigError(
+            f"Unknown context '{name}'. Configured: {', '.join(ctxs) or '(none)'}. "
+            f"Run `g3dt config contexts` or `g3dt config discover --add`."
+        )
+    ctx = ctxs[name]
+    path = _marker_write_path()
+    data = dict(_load_yaml_cached(str(path))) if path.is_file() else {}
+    if not data.get("contexts"):
+        # v1 marker: materialize the synthesized contexts first (auto-migrate),
+        # preserving every legacy key in the file.
+        data["contexts"] = {
+            c.name: {k: v for k, v in (
+                ("project", c.project), ("env", c.env),
+                ("profile", c.profile), ("region", c.region),
+                ("production", c.production),
+            ) if v}
+            for c in ctxs.values()
+        }
+    data["current"] = name
+    if data.get("project") in (None, ctx.project):
+        data["default_env"] = ctx.env
+    _rewrite_marker(data, path)
+    return path
+
+
+def forget_context(name: str) -> Path:
+    """Remove one context from the marker (local-only; nothing in AWS changes)."""
+    path = _marker_write_path()
+    data = dict(_load_yaml_cached(str(path))) if path.is_file() else {}
+    existing = data.get("contexts") or {}
+    if name not in existing:
+        raise ConfigError(
+            f"Unknown context '{name}'. Configured: "
+            f"{', '.join(existing) or '(none — legacy markers have no stored contexts)'}."
+        )
+    del existing[name]
+    data["contexts"] = existing
+    if data.get("current") == name:
+        data.pop("current", None)
+    _rewrite_marker(data, path)
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # Environments                                                                 #
 # --------------------------------------------------------------------------- #
@@ -226,18 +343,36 @@ def env_base(env: str) -> str:
 def aws_profile_for(env: str, marker: Optional[dict] = None) -> Optional[str]:
     """Return the local AWS named profile for ``env``, or ``None`` (ambient).
 
-    Read from the marker's optional ``profiles:`` map, e.g.::
+    With a v2 marker (an explicit ``contexts:`` block) the profile comes from
+    the context matching ``env`` within the active project — this is what lets
+    one laptop hold profiles for the same env name across different projects.
+    Legacy markers read the flat ``profiles:`` map exactly as before, e.g.::
 
         profiles:
           test: etl_test
           staging: etl_staging
 
-    On the EC2 box / CodeBuild there is no ``profiles`` map, so the default
-    credential chain (the instance/build role) is used — by design.
+    On the EC2 box / CodeBuild there is no ``profiles`` map (and usually no
+    marker), so the default credential chain (the instance/build role) is
+    used — by design.
     """
     m = marker if marker is not None else load_marker()
+    base = env_base(env)
+    if m.get("contexts"):
+        from g3dt import contexts as _contexts  # lazy: avoids import cycle
+
+        ctxs = _contexts.list_contexts(m)
+        current = _contexts.current_context_name(m)
+        project = ctxs[current].project if current in ctxs else m.get("project")
+        matches = [
+            c for c in ctxs.values()
+            if c.env == base and (project is None or c.project == project)
+        ]
+        if len(matches) == 1:
+            return matches[0].profile
+        # zero or ambiguous: fall through to the legacy map (usually empty)
     profiles = m.get("profiles") or {}
-    return profiles.get(env_base(env))
+    return profiles.get(base)
 
 
 @dataclass(frozen=True)
@@ -404,13 +539,37 @@ def dictionary_version_of(filename: str) -> Optional[str]:
 
 
 def list_envs(project: Optional[str] = None) -> List[str]:
-    """Return the environments that have a deployed SSM tree for the project."""
+    """Return the environments that have a deployed SSM tree for the project.
+
+    With a v2 marker the listing is the union across every context of the
+    project — each context authenticates with its own profile, so a project
+    spanning several AWS accounts lists all its envs (per-context auth
+    failures are tolerated, not fatal). Legacy markers keep the historical
+    single-call behavior: any configured profile (they all target the same
+    account) or the ambient chain.
+    """
     from g3dt import resolver
 
     marker = load_marker()
     project = project or require_project(marker)
-    # Listing spans envs, so authenticate with any configured profile (they all
-    # target the same account) or the ambient chain.
+    if marker.get("contexts"):
+        from g3dt import contexts as _contexts
+
+        found: List[str] = []
+        for ctx in _contexts.list_contexts(marker).values():
+            if ctx.project != project:
+                continue
+            try:
+                for env in resolver.list_envs(
+                    project, profile=ctx.profile, region=ctx.region
+                ):
+                    if env not in found:
+                        found.append(env)
+            except Exception:  # auth/SSO/network per-context: skip, not fatal
+                continue
+        return found
+    # Legacy: listing spans envs, so authenticate with any configured profile
+    # (they all target the same account) or the ambient chain.
     profiles = marker.get("profiles") or {}
     profile = next(iter(profiles.values()), None)
     return resolver.list_envs(project, profile=profile)
