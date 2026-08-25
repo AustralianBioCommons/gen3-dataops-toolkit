@@ -3,8 +3,20 @@
 These mirror (and strengthen) the guards already baked into the shell scripts:
 the test-only ``synth deploy`` guard, the prod aborts in the bulk scripts, and
 the optional delete confirmation prompts.
+
+3.8.0: the guards are context-aware. Production is any env/study key whose
+name contains ``prod`` (unchanged), OR an active context classified production
+(``production: true`` flag, or 'prod' in its name — see
+``contexts.is_production``). When a *named* context from the marker is active,
+the typed confirmation token is the **context name** (e.g. ``acdc/prod``);
+legacy and synthetic contexts keep the historical env-name/target tokens, so
+older muscle memory and the pinned safety tests are unaffected. ``--yes``
+never bypasses a production prompt, and confirmation always happens locally,
+before any EC2 dispatch.
 """
 from __future__ import annotations
+
+from typing import Optional
 
 import typer
 
@@ -14,6 +26,37 @@ from g3dt.config import env_base
 def is_prod(env: str) -> bool:
     """True if the environment name refers to production."""
     return "prod" in env.lower()
+
+
+def _active_prod_context():
+    """The active context when it is production-classified, else ``None``."""
+    from g3dt import contexts
+
+    ctx = contexts.active()
+    if ctx is not None and contexts.is_production(ctx):
+        return ctx
+    return None
+
+
+def _named(ctx) -> bool:
+    """True for a context the operator configured by name (marker source)."""
+    return ctx is not None and ctx.source == "marker"
+
+
+def _typed_gate(header: str, token: str) -> None:
+    typer.secho(header, fg=typer.colors.RED, bold=True)
+    # default="" so an empty entry (just pressing Enter) returns immediately
+    # and aborts, instead of click re-prompting forever.
+    typed = typer.prompt(
+        f"Type '{token}' to confirm", default="", show_default=False
+    )
+    if typed.strip() != token:
+        typer.secho(
+            "Confirmation did not match. Aborting.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 def require_test_env(env: str) -> None:
@@ -36,31 +79,25 @@ def require_test_env(env: str) -> None:
 def confirm_destructive(action: str, target: str, env: str, assume_yes: bool) -> None:
     """Gate a destructive operation with an appropriate confirmation.
 
-    * Production: ALWAYS require typing the ``target`` exactly, even with
-      ``--yes`` (so automation can never silently delete prod data).
+    * Production (env name, study key, or the active context's
+      classification): ALWAYS require a typed confirmation, even with
+      ``--yes`` (so automation can never silently delete prod data). The
+      token is the active context's name when one is configured, else the
+      ``target``.
     * Non-production: a simple y/N prompt, skippable with ``--yes``.
 
     Confirmation always happens locally, before any EC2 dispatch (SSM has no
     TTY), after which the remote job is invoked with ``--yes``.
     """
-    if is_prod(env):
-        typer.secho(
-            f"PRODUCTION {action} targeting '{target}' (env={env}).",
-            fg=typer.colors.RED,
-            bold=True,
+    ctx = _active_prod_context()
+    if is_prod(env) or ctx is not None:
+        token = ctx.name if _named(ctx) else target
+        _typed_gate(
+            f"PRODUCTION {action} targeting '{target}' (env={env}"
+            + (f", ctx={ctx.name}" if ctx is not None else "")
+            + ").",
+            token,
         )
-        # default="" so an empty entry (just pressing Enter) returns immediately
-        # and aborts, instead of click re-prompting forever.
-        typed = typer.prompt(
-            f"Type '{target}' to confirm", default="", show_default=False
-        )
-        if typed.strip() != target:
-            typer.secho(
-                "Confirmation did not match. Aborting.",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(1)
         return
 
     if assume_yes:
@@ -71,28 +108,23 @@ def confirm_destructive(action: str, target: str, env: str, assume_yes: bool) ->
 
 
 def confirm_prod_strict(action: str, env: str) -> None:
-    """Warn and require typing the env name before any action against production.
+    """Warn and require a typed confirmation before any action on production.
 
-    Production is any env whose name contains ``prod`` (see :func:`is_prod`).
-    Non-production environments return immediately (no prompt). The confirmation
-    cannot be bypassed, so automation can never silently act on prod.
+    Production is any env whose name contains ``prod`` (see :func:`is_prod`)
+    or an active production-classified context. Non-production returns
+    immediately (no prompt). The confirmation cannot be bypassed, so
+    automation can never silently act on prod. The token is the active
+    context's name when one is configured, else the env name.
 
     Used by the ``synth`` commands, which may target any configured environment.
     """
-    if not is_prod(env):
+    ctx = _active_prod_context()
+    if not is_prod(env) and ctx is None:
         return
-    typer.secho(
-        f"PRODUCTION {action} targeting env '{env}'.",
-        fg=typer.colors.RED,
-        bold=True,
+    token = ctx.name if _named(ctx) else env
+    _typed_gate(
+        f"PRODUCTION {action} targeting env '{env}'"
+        + (f" (ctx={ctx.name})" if ctx is not None else "")
+        + ".",
+        token,
     )
-    # default="" so an empty entry (just pressing Enter) returns immediately and
-    # aborts, instead of click re-prompting forever.
-    typed = typer.prompt(f"Type '{env}' to confirm", default="", show_default=False)
-    if typed.strip() != env:
-        typer.secho(
-            "Confirmation did not match. Aborting.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(1)
