@@ -71,7 +71,7 @@ Contexts: what am I pointed at?
   prints the active one first (to stderr) — read that line before anything
   else. Production contexts are marked [PROD] and gate destructive actions
   behind typing the context name; --yes never bypasses that.
-    g3dt config discover --all-profiles --add   find + register deployed infra
+    g3dt config discover <aws-profile> --add   find + register deployed infra
     g3dt config contexts                        list them (current marked *)
     g3dt config use <name>                      act there from now on
     g3dt --ctx <name> <command>                 one-shot override

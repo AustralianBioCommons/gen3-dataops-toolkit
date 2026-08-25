@@ -25,9 +25,9 @@ pip install gen3-dataops-toolkit
 ## Bootstrap: discover, then use
 
 ```bash
-g3dt config discover --all-profiles --add   # find every deployed env your
-                                            # AWS profiles can see; register
-                                            # them as contexts
+g3dt config discover <aws-profile> --add    # logs the profile in if needed,
+                                            # lists every deployed env its
+                                            # account holds, registers them
 g3dt config contexts                        # list them (current marked *)
 g3dt config use myproj/test                 # point g3dt at one
 ```

@@ -187,3 +187,59 @@ def test_config_set_is_hidden_and_warns_but_works(_clean):
     assert result.exit_code == 0
     assert "DEPRECATED" in result.output
     assert config.load_marker()["project"] == "etl"
+
+def test_discover_single_profile_prompts_login_when_stale(_clean):
+    """
+    The recommended flow: `g3dt config discover <profile>` for ONE profile.
+
+    Background (user feedback on 3.8.0): the --all-profiles sweep mostly
+    prints "go log in N times" because SSO tokens are usually stale — so the
+    single-profile form checks the session first and OFFERS to run
+    `aws sso login` right there, then scans.
+
+    Input:    stale session, user answers 'y', login subprocess succeeds.
+    Expected: aws sso login is invoked for that profile, the scan runs, and
+              --add registers the finding.
+    """
+    _write(_clean, "region: ap-southeast-2\n")
+    import subprocess as _subprocess
+    with patch("botocore.session.Session") as sess, \
+         patch("g3dt.cli.config_cmds._profile_session_valid") as valid, \
+         patch("subprocess.run") as run, \
+         patch("g3dt.cli.config_cmds._scan_profile") as scan:
+        sess.return_value.full_config = {"profiles": {"p_one": {}}}
+        valid.side_effect = [False, True]      # stale, then valid post-login
+        run.return_value = _subprocess.CompletedProcess([], 0)
+        scan.return_value = [("etl", "test")]
+        result = runner.invoke(app, ["config", "discover", "p_one", "--add"],
+                               input="y\n")
+    assert result.exit_code == 0, result.output
+    assert run.call_args[0][0] == ["aws", "sso", "login", "--profile", "p_one"]
+    assert "etl/test" in contexts.list_contexts()
+
+
+def test_discover_single_profile_declined_login_aborts(_clean):
+    _write(_clean, "region: ap-southeast-2\n")
+    with patch("botocore.session.Session") as sess, \
+         patch("g3dt.cli.config_cmds._profile_session_valid", return_value=False):
+        sess.return_value.full_config = {"profiles": {"p_one": {}}}
+        result = runner.invoke(app, ["config", "discover", "p_one"], input="n\n")
+    assert result.exit_code == 1
+    assert "log in and re-run" in result.output
+
+
+def test_discover_dedupes_same_context_across_profiles(_clean):
+    """
+    Two profiles pointing at the SAME account (e.g. a 'default' alias) must
+    yield ONE suggestion/registration for a given project/env — the first
+    profile wins (observed live: acdc/staging suggested twice).
+    """
+    _write(_clean, "region: ap-southeast-2\n")
+    with patch("botocore.session.Session") as sess, \
+         patch("g3dt.cli.config_cmds._scan_profile") as scan:
+        sess.return_value.full_config = {"profiles": {"a_first": {}, "b_alias": {}}}
+        scan.side_effect = [[("etl", "test")], [("etl", "test")]]
+        result = runner.invoke(app, ["config", "discover", "--all-profiles"])
+    assert result.exit_code == 0
+    assert result.output.count("g3dt config add etl/test") == 1
+    assert "--profile a_first" in result.output

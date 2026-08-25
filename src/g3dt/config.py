@@ -180,7 +180,7 @@ def require_project(marker: Optional[dict] = None) -> str:
     if not project:
         raise ConfigError(
             "No project configured. Register a context with "
-            "`g3dt config discover --all-profiles --add` and select it with "
+            "`g3dt config discover <aws-profile> --add` and select it with "
             "`g3dt config use <name>` — or create a g3dt.yaml marker "
             f"(searched: {', '.join(MARKER_PATHS)}) with at least:\n"
             "    project: <projectId>\n"

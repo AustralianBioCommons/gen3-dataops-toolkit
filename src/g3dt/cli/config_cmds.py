@@ -226,10 +226,16 @@ def forget(
 
 @app.command("discover")
 def discover(
+    profile_arg: str = typer.Argument(
+        None, metavar="[PROFILE]",
+        help="Scan just this AWS profile's account. If its SSO session is "
+             "stale you are offered `aws sso login` first.",
+    ),
     all_profiles: bool = typer.Option(
         False, "--all-profiles",
         help="Scan every profile in ~/.aws/config for deployed "
-             "/{project}/{env} trees.",
+             "/{project}/{env} trees (profiles with stale sessions are "
+             "skipped, not logged in).",
     ),
     add_found: bool = typer.Option(
         False, "--add", help="Register discovered pairs as contexts."
@@ -243,10 +249,11 @@ def discover(
 ) -> None:
     """Find deployable infrastructure.
 
-    Default: verify each configured context against its own account (nothing
-    else is touched). With --all-profiles: enumerate every AWS profile and
-    list all deployed environments its account holds; add --add to register
-    them as contexts.
+    With a PROFILE argument: log that one profile in if needed, then list
+    every deployed environment its account holds — the recommended flow.
+    With --all-profiles: sweep every configured profile (stale sessions are
+    skipped). With neither: verify each already-configured context against
+    its own account. Add --add to register findings as contexts.
     """
     resolve.announce_context()
     # The scan probes credentials that may be stale; botocore logs its own
@@ -259,12 +266,17 @@ def discover(
     marker = config.load_marker()
     default_region = region or marker.get("region") or config.DEFAULT_REGION
 
-    if not all_profiles:
+    if profile_arg and all_profiles:
+        typer.secho("Pass either a PROFILE argument or --all-profiles, not both.",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    if not profile_arg and not all_profiles:
         ctxs = contexts.list_contexts(marker)
         if not ctxs:
             typer.secho(
                 "No contexts configured to verify. Try "
-                "`g3dt config discover --all-profiles [--add]`.",
+                "`g3dt config discover <aws-profile> --add`.",
                 fg=typer.colors.YELLOW,
             )
             return
@@ -285,13 +297,48 @@ def discover(
     import botocore.session
 
     profiles_cfg = botocore.session.Session().full_config.get("profiles", {})
-    names = profile or sorted(profiles_cfg)
-    if not names:
-        typer.secho("No AWS profiles found in ~/.aws/config.",
-                    fg=typer.colors.YELLOW)
-        return
+
+    if profile_arg:
+        if profile_arg not in profiles_cfg:
+            typer.secho(
+                f"No profile '{profile_arg}' in ~/.aws/config. Configured: "
+                f"{', '.join(sorted(profiles_cfg)) or '(none)'}.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(1)
+        if not _profile_session_valid(profile_arg):
+            typer.secho(
+                f"The SSO session for '{profile_arg}' is not valid.",
+                fg=typer.colors.YELLOW,
+            )
+            if not typer.confirm(
+                f"Run `aws sso login --profile {profile_arg}` now?",
+                default=True,
+            ):
+                typer.secho("Aborted — log in and re-run discover.",
+                            fg=typer.colors.YELLOW)
+                raise typer.Exit(1)
+            import subprocess
+
+            login = subprocess.run(
+                ["aws", "sso", "login", "--profile", profile_arg]
+            )
+            if login.returncode != 0 or not _profile_session_valid(profile_arg):
+                typer.secho(
+                    f"Still no valid session for '{profile_arg}'. Aborting.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(1)
+        names = [profile_arg]
+    else:
+        names = profile or sorted(profiles_cfg)
+        if not names:
+            typer.secho("No AWS profiles found in ~/.aws/config.",
+                        fg=typer.colors.YELLOW)
+            return
 
     found: List[contexts.Context] = []
+    seen_names = set()
     for prof in names:
         prof_region = (profiles_cfg.get(prof, {}).get("region")
                        or default_region)
@@ -309,6 +356,12 @@ def discover(
             continue
         for project, env in pairs:
             name = f"{project}/{env}"
+            if name in seen_names:
+                # Same account visible through several profiles (e.g. a
+                # 'default' alias): the first profile wins; don't print
+                # duplicate suggestions.
+                continue
+            seen_names.add(name)
             ctx = contexts.Context(
                 name=name, project=project, env=env, profile=prof,
                 region=prof_region,
@@ -338,6 +391,23 @@ def discover(
                 f"  g3dt config add {ctx.name} --project {ctx.project} "
                 f"--env {ctx.env} --profile {ctx.profile}"
             )
+
+
+def _profile_session_valid(profile: str) -> bool:
+    """Cheap credential check: can this profile sign a request right now?"""
+    import boto3
+    from botocore.config import Config as _BotoConfig
+
+    try:
+        session = boto3.Session(profile_name=profile)
+        session.client(
+            "sts",
+            config=_BotoConfig(connect_timeout=3, read_timeout=5,
+                               retries={"max_attempts": 1}),
+        ).get_caller_identity()
+        return True
+    except Exception:
+        return False
 
 
 def _scan_profile(profile: str, region: str) -> List[tuple]:

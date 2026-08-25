@@ -240,7 +240,7 @@ def resolve_context(
         raise _config.ConfigError(
             "No context selected. Pass --env/--ctx, set one with "
             "`g3dt config use <name>`, or register some with "
-            "`g3dt config discover --all-profiles --add`."
+            "`g3dt config discover <aws-profile> --add`."
         )
     return None, None
 
