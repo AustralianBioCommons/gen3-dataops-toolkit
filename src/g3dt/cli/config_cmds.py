@@ -1,27 +1,35 @@
-"""`g3dt config` — discover environments, studies, and resolved settings.
+"""`g3dt config` — contexts, discovery, and resolved settings.
 
-Everything the toolkit uses at runtime is resolved from SSM
-(``/{project}/{env}/...``, published by ``cdk deploy`` in
-gen3-aws-data-pipeline). These commands make that tree browsable so an
-operator can answer "what environments exist?" and "what will this actually
-do?" without touching the AWS console. The only local file is the tiny
-``g3dt.yaml`` bootstrap marker (project/region/default_env, optional per-env
-``profiles:`` and ``studies:`` maps) — ``g3dt config set`` edits that marker,
-nothing else.
+A **context** is a named (project, env, profile, region) tuple — the answer to
+"what is this command pointed at?" (design: docs/design/contexts.md). The
+commands here read as plain English:
+
+    g3dt config discover --all-profiles --add   # find deployed infra, register it
+    g3dt config contexts                        # list what I have
+    g3dt config use myproj/staging                # point g3dt at one of them
+    g3dt config show                            # what will commands actually do?
+
+Everything the toolkit uses at runtime still resolves from SSM
+(``/{project}/{env}/...``, published by ``cdk deploy``); the only local file is
+the ``g3dt.yaml`` marker, which now stores the contexts. Legacy markers
+(``project``/``default_env``/``profiles``) keep working unchanged — contexts
+are synthesized from them in memory.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import List, Optional
 
 import typer
 
-from g3dt import config
+from g3dt import config, contexts
+from g3dt.cli._internal import resolve
 from g3dt.cli._internal.resolve import env_of, study_of
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Inspect the resolved SSM config; edit the local bootstrap marker.",
+    help="Contexts (use/discover/contexts), plus the resolved SSM settings.",
 )
 
 
@@ -46,9 +54,322 @@ def _req_key(rc, key: str) -> str:
     return value
 
 
+# --------------------------------------------------------------------------- #
+# Context plumbing helpers                                                     #
+# --------------------------------------------------------------------------- #
+def _deployed_version(ctx: contexts.Context) -> str:
+    """One cheap SSM head per context: '✓ <ver>' / '—' / '?' — never raises."""
+    import boto3
+    from botocore.config import Config as _BotoConfig
+
+    try:
+        session = boto3.Session(profile_name=ctx.profile, region_name=ctx.region)
+        client = session.client(
+            "ssm",
+            config=_BotoConfig(connect_timeout=2, read_timeout=4,
+                               retries={"max_attempts": 1}),
+        )
+        value = client.get_parameter(
+            Name=f"/{ctx.project}/{ctx.env}/meta/toolkitVersion"
+        )["Parameter"]["Value"]
+        return f"✓ {value}"
+    except Exception as exc:  # ParameterNotFound / auth / SSO / network
+        name = type(exc).__name__
+        if "ParameterNotFound" in name or "ParameterNotFound" in str(exc):
+            return "—"
+        return "?"
+
+
+def _print_context_row(ctx: contexts.Context, current: Optional[str],
+                       deployed: Optional[str]) -> None:
+    star = "*" if ctx.name == current else " "
+    prod = contexts.is_production(ctx)
+    tag = " [PROD]" if prod else ""
+    src = " (legacy)" if ctx.source == "legacy" else ""
+    line = (f" {star} {ctx.name}{tag}{src}  project={ctx.project} "
+            f"env={ctx.env} profile={ctx.profile or '(ambient)'} "
+            f"region={ctx.region}")
+    if deployed is not None:
+        line += f"  deployed={deployed}"
+    typer.secho(line, fg=typer.colors.RED if prod else None, bold=prod)
+
+
+# --------------------------------------------------------------------------- #
+# The context commands                                                         #
+# --------------------------------------------------------------------------- #
+@app.command("contexts")
+def contexts_list(
+    no_verify: bool = typer.Option(
+        False, "--no-verify", help="Skip the per-context deployed check (offline)."
+    ),
+) -> None:
+    """List the configured contexts (current marked with *)."""
+    resolve.announce_context()
+    ctxs = contexts.list_contexts()
+    if not ctxs:
+        typer.secho(
+            "No contexts configured. Run `g3dt config discover --all-profiles "
+            "--add`, or `g3dt config add <name> --project <p> --env <e> "
+            "--profile <profile>`.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    current = contexts.current_context_name()
+    for ctx in ctxs.values():
+        deployed = None if no_verify else _deployed_version(ctx)
+        _print_context_row(ctx, current, deployed)
+
+
+@app.command("use")
+def use(
+    name: str = typer.Argument(..., help="Context name, e.g. myproj/staging."),
+) -> None:
+    """Point g3dt at a context: every following command acts there.
+
+    Switching to a production-classified context warns loudly and asks for
+    confirmation. Legacy markers are migrated in place on first use (all
+    legacy keys are preserved).
+    """
+    resolve.announce_context()
+    ctxs = contexts.list_contexts()
+    target = ctxs.get(name)
+    if target is None:
+        typer.secho(
+            f"Unknown context '{name}'. Configured: "
+            f"{', '.join(ctxs) or '(none)'}. "
+            f"Run `g3dt config contexts` or `g3dt config discover --add`.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    if contexts.is_production(target):
+        typer.secho(
+            f"\n  You are switching to a PRODUCTION context: {name}\n"
+            f"  project={target.project} env={target.env} "
+            f"profile={target.profile or '(ambient)'}\n"
+            f"  Every following command acts on production until you switch "
+            f"away.\n",
+            fg=typer.colors.RED, bold=True, err=True,
+        )
+        if not typer.confirm("Switch to this production context?", default=False):
+            typer.secho("Aborted — context unchanged.", fg=typer.colors.YELLOW)
+            raise typer.Exit(1)
+    try:
+        path = config.set_current_context(name)
+    except config.ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.secho(f"Now using context {name} ({path})", fg=typer.colors.GREEN)
+
+
+@app.command("add")
+def add(
+    name: str = typer.Argument(..., help="Context name, e.g. myproj/staging."),
+    project: str = typer.Option(..., "--project", help="Project id, e.g. myproj."),
+    env: str = typer.Option(..., "--env", help="Base environment, e.g. staging."),
+    profile: str = typer.Option(
+        None, "--profile", help="AWS named profile (omit for the ambient chain)."
+    ),
+    region: str = typer.Option(None, "--region", help="AWS region override."),
+    production: bool = typer.Option(
+        False, "--production",
+        help="Mark as production: strict typed confirmation on every "
+             "destructive action.",
+    ),
+) -> None:
+    """Register one context by hand (`config discover --add` is the usual path)."""
+    resolve.announce_context()
+    marker = config.load_marker()
+    ctx = contexts.Context(
+        name=name, project=project, env=config.env_base(env), profile=profile,
+        region=region or marker.get("region") or config.DEFAULT_REGION,
+        production=production or None,
+    )
+    try:
+        contexts._validate_context(name, {"project": project, "env": ctx.env})
+        path, added, skipped = config.upsert_contexts([ctx])
+    except config.ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if skipped:
+        typer.secho(
+            f"Context '{name}' already exists — not overwritten. "
+            f"`g3dt config forget {name}` first if you mean to replace it.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(1)
+    typer.secho(f"Added context {name} ({path})", fg=typer.colors.GREEN)
+
+
+@app.command("forget")
+def forget(
+    name: str = typer.Argument(..., help="Context name to forget."),
+    force: bool = typer.Option(
+        False, "--force", help="Allow forgetting the current context."
+    ),
+) -> None:
+    """Remove a context from the local marker. Nothing in AWS is touched."""
+    resolve.announce_context()
+    if name == contexts.current_context_name() and not force:
+        typer.secho(
+            f"'{name}' is the current context. Switch away first "
+            f"(`g3dt config use <other>`) or pass --force.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    try:
+        path = config.forget_context(name)
+    except config.ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.secho(f"Forgot context {name} ({path})", fg=typer.colors.GREEN)
+
+
+@app.command("discover")
+def discover(
+    all_profiles: bool = typer.Option(
+        False, "--all-profiles",
+        help="Scan every profile in ~/.aws/config for deployed "
+             "/{project}/{env} trees.",
+    ),
+    add_found: bool = typer.Option(
+        False, "--add", help="Register discovered pairs as contexts."
+    ),
+    profile: List[str] = typer.Option(
+        [], "--profile", help="Restrict --all-profiles to these profiles."
+    ),
+    region: str = typer.Option(
+        None, "--region", help="Region for profiles that configure none."
+    ),
+) -> None:
+    """Find deployable infrastructure.
+
+    Default: verify each configured context against its own account (nothing
+    else is touched). With --all-profiles: enumerate every AWS profile and
+    list all deployed environments its account holds; add --add to register
+    them as contexts.
+    """
+    resolve.announce_context()
+    marker = config.load_marker()
+    default_region = region or marker.get("region") or config.DEFAULT_REGION
+
+    if not all_profiles:
+        ctxs = contexts.list_contexts(marker)
+        if not ctxs:
+            typer.secho(
+                "No contexts configured to verify. Try "
+                "`g3dt config discover --all-profiles [--add]`.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        for ctx in ctxs.values():
+            state = _deployed_version(ctx)
+            if state.startswith("✓"):
+                label, color = f"OK ({state[2:]})", typer.colors.GREEN
+            elif state == "—":
+                label, color = "NOT DEPLOYED", typer.colors.YELLOW
+            else:
+                label, color = (
+                    f"AUTH FAILED (try: aws sso login --profile {ctx.profile})",
+                    typer.colors.RED,
+                )
+            typer.secho(f"  {ctx.name:<24} {label}", fg=color)
+        return
+
+    import botocore.session
+
+    profiles_cfg = botocore.session.Session().full_config.get("profiles", {})
+    names = profile or sorted(profiles_cfg)
+    if not names:
+        typer.secho("No AWS profiles found in ~/.aws/config.",
+                    fg=typer.colors.YELLOW)
+        return
+
+    found: List[contexts.Context] = []
+    for prof in names:
+        prof_region = (profiles_cfg.get(prof, {}).get("region")
+                       or default_region)
+        try:
+            pairs = _scan_profile(prof, prof_region)
+        except Exception as exc:
+            typer.secho(
+                f"  {prof}: skipped ({type(exc).__name__} — "
+                f"try: aws sso login --profile {prof})",
+                fg=typer.colors.YELLOW,
+            )
+            continue
+        if not pairs:
+            typer.secho(f"  {prof}: no deployed environments", err=False)
+            continue
+        for project, env in pairs:
+            name = f"{project}/{env}"
+            ctx = contexts.Context(
+                name=name, project=project, env=env, profile=prof,
+                region=prof_region,
+            )
+            found.append(ctx)
+            prod = contexts.is_production(ctx)
+            typer.secho(
+                f"  {prof}: found {name}" + (" [PROD]" if prod else ""),
+                fg=typer.colors.RED if prod else typer.colors.GREEN,
+                bold=prod,
+            )
+
+    if not found:
+        return
+    if add_found:
+        path, added, skipped = config.upsert_contexts(found)
+        typer.secho(
+            f"Registered {len(added)} context(s) in {path}"
+            + (f"; kept existing: {', '.join(skipped)}" if skipped else ""),
+            fg=typer.colors.GREEN,
+        )
+        typer.echo("Select one with: g3dt config use <name>")
+    else:
+        typer.echo("\nRegister these with --add, or individually:")
+        for ctx in found:
+            typer.echo(
+                f"  g3dt config add {ctx.name} --project {ctx.project} "
+                f"--env {ctx.env} --profile {ctx.profile}"
+            )
+
+
+def _scan_profile(profile: str, region: str) -> List[tuple]:
+    """All deployed (project, env) pairs visible to one profile's account.
+
+    One filtered DescribeParameters walk: every deployed environment publishes
+    exactly one ``/{project}/{env}/meta/toolkitVersion`` leaf.
+    """
+    import boto3
+    from botocore.config import Config as _BotoConfig
+
+    session = boto3.Session(profile_name=profile, region_name=region)
+    client = session.client(
+        "ssm",
+        config=_BotoConfig(connect_timeout=3, read_timeout=8,
+                           retries={"max_attempts": 1}),
+    )
+    pairs = []
+    paginator = client.get_paginator("describe_parameters")
+    for page in paginator.paginate(
+        ParameterFilters=[{
+            "Key": "Name", "Option": "Contains",
+            "Values": ["/meta/toolkitVersion"],
+        }]
+    ):
+        for param in page["Parameters"]:
+            parts = param["Name"].split("/")  # ['', project, env, 'meta', ...]
+            if len(parts) >= 5 and parts[3] == "meta":
+                pairs.append((parts[1], parts[2]))
+    return sorted(set(pairs))
+
+
+# --------------------------------------------------------------------------- #
+# Environment / study introspection (context-aware)                            #
+# --------------------------------------------------------------------------- #
 @app.command()
 def envs() -> None:
     """List the environments with a deployed SSM tree for this project."""
+    resolve.announce_context()
     try:
         for name in config.list_envs():
             typer.echo(name)
@@ -71,6 +392,10 @@ def studies(
     The registry comes from the marker's studies: block, or — pass --env —
     from the env's S3 registry, which is what the EC2 job box uses.
     """
+    if env is not None:
+        env = resolve.active_env(env)
+    else:
+        resolve.announce_context()
     names = config.list_studies(env=env)
     if not names:
         typer.secho(
@@ -86,7 +411,10 @@ def studies(
 
 @app.command()
 def show(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(
+        None, "--env", "-e",
+        help="Environment; defaults to the current context.",
+    ),
     study: str = typer.Option(
         None, "--study", "-s", help="Optional study to resolve against the env."
     ),
@@ -94,12 +422,13 @@ def show(
         False, "--full", help="Also dump the raw SSM subtree (every parameter)."
     ),
 ) -> None:
-    """Print fully-resolved settings for an env (and optionally a study).
+    """Print fully-resolved settings for the current context (or --env).
 
     Use this before any job to confirm the exact names the tooling will use —
     the staging-vs-prod safety check. Everything shown is read live from the
-    env's SSM tree; nothing is local except the marker's project/profiles.
+    env's SSM tree; nothing is local except the marker's contexts.
     """
+    env = resolve.active_env(env)
     e = env_of(env)
     typer.secho(f"Environment: {e.name}", bold=True)
     typer.echo(f"  is_ec2             : {e.is_ec2}")
@@ -122,7 +451,7 @@ def show(
     # llm block); only the key *path* is local, from the marker.
     typer.echo(f"  llm_provider       : {e.llm_provider}")
     typer.echo(f"  llm_model          : {e.llm_model or '(not set — pass --llm-model or add the llm block to the CDK config)'}")
-    typer.echo(f"  llm_api_key_file   : {config.llm_api_key_file() or '(not set — g3dt config set llm_api_key_file <path>)'}")
+    typer.echo(f"  llm_api_key_file   : {config.llm_api_key_file() or '(not set — g3dt synth set-key <path>)'}")
     # k8s restart targets: from SSM (the CDK's optional k8s block), restarted
     # in the listed order by restart-schema/restart-ms/dict deploy/synth deploy.
     typer.echo(f"  restart_services   : {e.restart_services}")
@@ -134,14 +463,7 @@ def show(
         typer.echo(f"  program_id       : {s.program_id}")
         typer.echo(f"  s3_metadata_path : {s.s3_metadata_path}")
     if full:
-        from g3dt import resolver
-
-        marker = config.load_marker()
-        project = config.require_project(marker)
-        rc = resolver.resolve(
-            project, config.env_base(env),
-            profile=config.aws_profile_for(env, marker),
-        )
+        rc = resolve.rc_of(env)
         typer.secho(
             f"\n/{rc.project}/{rc.env}  ({len(rc.params)} parameters)", bold=True
         )
@@ -151,13 +473,16 @@ def show(
 
 @app.command()
 def diff(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(
+        None, "--env", "-e",
+        help="Environment; defaults to the current context.",
+    ),
     file: Path = typer.Option(
         ...,
         "--file",
         "-f",
-        help="The env's INPUT file in the CDK repo, e.g. "
-        "../gen3-aws-data-pipeline/config/etl.test.json.",
+        help="The env's INPUT file in the deployment wrapper, e.g. "
+        "../myproj-pipeline-deploy/config/myproj.staging.json.",
     ),
 ) -> None:
     """Flag drift between SSM and the committed CDK INPUT file.
@@ -167,18 +492,9 @@ def diff(
     A difference means "someone edited the JSON but didn't `cdk deploy`" (or
     vice-versa). Exits 1 on drift, so it can gate CI.
     """
-    from g3dt import resolver
-
-    marker = config.load_marker()
-    project = config.require_project(marker)
-    try:
-        rc = resolver.resolve(
-            project, config.env_base(env),
-            profile=config.aws_profile_for(env, marker),
-        )
-    except config.ConfigError as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(1)
+    env = resolve.active_env(env)
+    rc = resolve.rc_of(env)
+    project = rc.project
 
     inputs = json.loads(file.read_text())
     gen3 = inputs.get("gen3", {})
@@ -242,7 +558,11 @@ def diff(
 
 @app.command("dbt-env")
 def dbt_env(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(
+        None, "--env", "-e",
+        help="Environment; defaults to the current context. CodeBuild always "
+             "passes this explicitly.",
+    ),
 ) -> None:
     """Emit `export` lines for the env's dbt settings (resolved from SSM).
 
@@ -251,17 +571,14 @@ def dbt_env(
     CodeBuild and a laptop:
 
         eval "$(g3dt config dbt-env --env test)" && dbt build
+
+    The context banner goes to stderr, so stdout stays eval-clean.
     """
     import shlex
 
-    from g3dt import resolver
-
-    marker = config.load_marker()
-    project = config.require_project(marker)
-    base = config.env_base(env)
-    profile = None if env.endswith("_ec2") else config.aws_profile_for(base, marker)
+    env = resolve.active_env(env)
     try:
-        rc = resolver.resolve(project, base, profile=profile)
+        rc = resolve.rc_of(env)
         silver_db = _req_key(rc, "glue/db/silver")
         gold_db = _req_key(rc, "glue/db/gold")
         silver_bucket = _req_key(rc, "buckets/silver")
@@ -270,6 +587,8 @@ def dbt_env(
     except config.ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    profile = (None if env.endswith("_ec2")
+               else config.aws_profile_for(env, config.load_marker()))
 
     values = {
         "G3DT_REGION": rc.region,
@@ -300,23 +619,24 @@ def dbt_env(
             typer.echo(f"export {key}={shlex.quote(str(value))}")
 
 
-@app.command("set")
+@app.command("set", hidden=True)
 def set_value(
-    key: str = typer.Argument(..., help="Bootstrap key: project, region, default_env."),
-    value: str = typer.Argument(..., help="New value, e.g. etl."),
+    key: str = typer.Argument(..., help="Legacy bootstrap key."),
+    value: str = typer.Argument(..., help="New value."),
 ) -> None:
-    """Set one bootstrap key in the local g3dt.yaml marker.
+    """(Deprecated) Set one legacy bootstrap key in the local marker.
 
-    Only the bootstrap (project/region/default_env) lives locally. Deployed
-    settings — dictionary_version, domain, buckets, ... — are CDK INPUTS: edit
-    config/<project>.<env>.json in gen3-aws-data-pipeline and `cdk deploy`;
-    the values flow to SSM, which is what every consumer reads.
-
-    The one exception is per-invocation: `dict pull/upload/deploy --version`
-    fetches a different dictionary tag without a redeploy (for promoting one
-    dictionary across environments). That does not persist — `config diff`
-    reports the gap until the CDK config is updated to match.
+    Contexts replaced this: `g3dt config use <name>` selects where commands
+    act, `g3dt config add`/`discover --add` register contexts, and the synth
+    LLM key path moved to `g3dt synth set-key <path>`. This command remains
+    for back-compat with the legacy project/region/default_env keys only.
     """
+    resolve.announce_context()
+    typer.secho(
+        "DEPRECATED: `g3dt config set` is superseded by contexts — see "
+        "`g3dt config use` / `g3dt config add` / `g3dt synth set-key`.",
+        fg=typer.colors.YELLOW, err=True,
+    )
     try:
         old, new, path = config.set_marker_value(key, value)
     except config.ConfigError as exc:
