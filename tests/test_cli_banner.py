@@ -97,7 +97,7 @@ def test_banner_marks_prod_contexts(_clean):
         project: etl
         region: ap-southeast-2
     """)
-    result = runner.invoke(app, ["config", "contexts", "--no-verify"])
+    result = runner.invoke(app, ["config", "contexts"])
     assert "[PROD]" in result.stderr.splitlines()[0]
 
 

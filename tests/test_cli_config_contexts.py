@@ -49,15 +49,73 @@ V2 = """
 def test_contexts_lists_current_and_prod_marking(_clean):
     """
     Input:    a v2 marker with a staging (current) and a prod context.
-    Expected: both rows listed; current marked with *; prod row tagged [PROD].
-    --no-verify keeps the listing offline (no SSM call to fail).
+    Expected: both rows listed; current marked with *; prod row tagged [PROD]
+              — and NO AWS call is made.
+
+    Background (user feedback on 3.8.1): the default listing used to run one
+    SSM read per context, so every profile with a stale SSO session dumped a
+    botocore traceback and the command took seconds. Listing what the local
+    marker holds must be instant and offline; the deployed check is opt-in
+    via --verify.
+    """
+    _write(_clean, V2)
+    with patch("g3dt.cli.config_cmds._deployed_version") as head:
+        result = runner.invoke(app, ["config", "contexts"])
+    assert result.exit_code == 0
+    head.assert_not_called()
+    out = result.output
+    assert "* etl/staging" in out
+    assert "etl/prod [PROD]" in out
+    assert "deployed=" not in out
+
+
+def test_contexts_verify_adds_deployed_column(_clean):
+    """
+    --verify opts into the per-context deployed check (one SSM read each).
+    A context whose credentials cannot answer shows '?' plus a copy-pasteable
+    `aws sso login` hint — because only one SSO profile is usually logged in
+    at a time, '?' most often just means "not this profile right now".
+    """
+    _write(_clean, V2)
+    with patch("g3dt.cli.config_cmds._deployed_version") as head:
+        head.side_effect = ["✓ 3.9.0", "?"]
+        result = runner.invoke(app, ["config", "contexts", "--verify"])
+    assert result.exit_code == 0
+    assert head.call_count == 2
+    assert "deployed=✓ 3.9.0" in result.output
+    assert "aws sso login --profile etl_prod" in result.output
+
+
+def test_contexts_no_verify_still_accepted_as_default(_clean):
+    """
+    3.8.x scripts spelled the offline listing `config contexts --no-verify`.
+    The flag pair --verify/--no-verify keeps that spelling parseable — it now
+    simply names the default behavior.
     """
     _write(_clean, V2)
     result = runner.invoke(app, ["config", "contexts", "--no-verify"])
     assert result.exit_code == 0
-    out = result.output
-    assert "* etl/staging" in out
-    assert "etl/prod [PROD]" in out
+    assert "* etl/staging" in result.output
+    assert "deployed=" not in result.output
+
+
+def test_config_current_prints_bare_name(_clean):
+    """
+    `config current` answers "which context am I on?" with just the name on
+    stdout (banner and colors stay on stderr), so it is safe to use in
+    scripts: NAME=$(g3dt config current).
+    """
+    _write(_clean, V2)
+    result = runner.invoke(app, ["config", "current"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "etl/staging"
+
+
+def test_config_current_none_selected_exits_1(_clean):
+    """A bare machine has no current context: exit 1 with guidance."""
+    result = runner.invoke(app, ["config", "current"])
+    assert result.exit_code == 1
+    assert "config use" in result.output
 
 
 def test_use_switches_and_writes_current(_clean):

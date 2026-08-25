@@ -91,6 +91,8 @@ def _print_context_row(ctx: contexts.Context, current: Optional[str],
             f"region={ctx.region}")
     if deployed is not None:
         line += f"  deployed={deployed}"
+        if deployed == "?" and ctx.profile:
+            line += f"  (try: aws sso login --profile {ctx.profile})"
     typer.secho(line, fg=typer.colors.RED if prod else None, bold=prod)
 
 
@@ -99,25 +101,55 @@ def _print_context_row(ctx: contexts.Context, current: Optional[str],
 # --------------------------------------------------------------------------- #
 @app.command("contexts")
 def contexts_list(
-    no_verify: bool = typer.Option(
-        False, "--no-verify", help="Skip the per-context deployed check (offline)."
+    verify: bool = typer.Option(
+        False,
+        "--verify/--no-verify",
+        help="Check each context's deployed toolkit version (one SSM read "
+             "per context; needs live AWS credentials). Default: list the "
+             "local marker only, fully offline.",
     ),
 ) -> None:
-    """List the configured contexts (current marked with *)."""
+    """List the locally registered contexts (current marked with *).
+
+    Reads only the local g3dt.yaml marker — no AWS/SSO calls are made
+    unless --verify is passed.
+    """
     resolve.announce_context()
     ctxs = contexts.list_contexts()
     if not ctxs:
         typer.secho(
-            "No contexts configured. Run `g3dt config discover --all-profiles "
-            "--add`, or `g3dt config add <name> --project <p> --env <e> "
-            "--profile <profile>`.",
+            "No contexts configured. Run 'g3dt config discover <aws-profile> "
+            "--add', or 'g3dt config add <name> --project <p> --env <e> "
+            "--profile <profile>'.",
             fg=typer.colors.YELLOW,
         )
         return
     current = contexts.current_context_name()
-    for ctx in ctxs.values():
-        deployed = None if no_verify else _deployed_version(ctx)
-        _print_context_row(ctx, current, deployed)
+    if verify:
+        from g3dt.cli._internal.aws_quiet import quiet_botocore
+
+        with quiet_botocore():
+            for ctx in ctxs.values():
+                _print_context_row(ctx, current, _deployed_version(ctx))
+    else:
+        for ctx in ctxs.values():
+            _print_context_row(ctx, current, None)
+
+
+@app.command("current")
+def current_cmd() -> None:
+    """Print the current context name (script-friendly; exit 1 if none)."""
+    resolve.announce_context()
+    name = contexts.current_context_name()
+    if name is None:
+        typer.secho(
+            "No context selected — run 'g3dt config use <name>' "
+            "(see 'g3dt config contexts').",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(name)
 
 
 @app.command("use")

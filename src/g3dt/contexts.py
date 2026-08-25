@@ -276,7 +276,7 @@ def banner_line(ctx: Optional[Context], effective_env: Optional[str]) -> str:
     """The one-line context banner (design doc section 6). Pure formatting."""
     if ctx is None:
         return ("ctx (none configured) → run 'g3dt config discover "
-                "--all-profiles --add' or pass --env/--ctx")
+                "<aws-profile> --add' or pass --env/--ctx")
     tags = ""
     if is_production(ctx):
         tags += " [PROD]"
