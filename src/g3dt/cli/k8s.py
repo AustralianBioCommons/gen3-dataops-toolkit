@@ -18,7 +18,7 @@ from typing import Optional
 import typer
 
 from g3dt.config import script_env
-from g3dt.cli._internal import runner
+from g3dt.cli._internal import resolve, runner
 from g3dt.cli._internal.resolve import env_of
 
 app = typer.Typer(no_args_is_help=True, help="ArgoCD / Kubernetes restarts (local).")
@@ -50,13 +50,14 @@ def restart_env(e, restart_services: Optional[str] = None,
 
 @app.command(name="restart-schema")
 def restart_schema(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     sync: bool = typer.Option(False, "--sync", "-s", help="argocd app sync first."),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),
 ) -> None:
     """Restart the schema microservices, in the env's configured order."""
+    env = resolve.active_env(env)
     e = env_of(env)
     args = ["-d", e.domain, "-a", e.app_name, "-n", e.namespace]
     if sync:
@@ -69,13 +70,14 @@ def restart_schema(
 
 @app.command(name="restart-etl")
 def restart_etl(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     sync: bool = typer.Option(False, "--sync", "-s", help="argocd app sync first."),
     etl_cronjob: Optional[str] = typer.Option(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
 ) -> None:
     """Create + run the ETL cronjob and wait for completion."""
+    env = resolve.active_env(env)
     e = env_of(env)
     args = ["-e", env]
     if sync:
@@ -88,7 +90,7 @@ def restart_etl(
 
 @app.command(name="restart-ms")
 def restart_ms(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),
@@ -97,6 +99,7 @@ def restart_ms(
     ),
 ) -> None:
     """Restart both ETL and schema microservices (wraps restart_etl_and_ms.sh)."""
+    env = resolve.active_env(env)
     e = env_of(env)
     runner.run(
         runner.bash_script(_ETL_AND_MS, env),

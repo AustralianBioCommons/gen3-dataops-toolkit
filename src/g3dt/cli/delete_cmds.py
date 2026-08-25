@@ -16,7 +16,7 @@ import re
 
 import typer
 
-from g3dt.cli._internal import dispatch, safety
+from g3dt.cli._internal import dispatch, resolve, safety
 from g3dt.cli._internal.dispatch import Target
 from g3dt.cli._internal.resolve import study_of
 
@@ -126,7 +126,7 @@ def metadata(
         help="Comma-separated studies, each optionally 'name:version', "
              "e.g. ausdiab:0.7.5,cdah:0.8.1,edcad.",
     ),
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     version: str = typer.Option(
         None,
         "--version",
@@ -150,6 +150,7 @@ def metadata(
       g3dt delete metadata --studies "ausdiab:0.7.5,cdah:0.8.1" --env staging
       g3dt delete metadata --studies "ausdiab:all,cdah" --version 0.9.8 --env staging
     """
+    env = resolve.active_env(env)
     fallback = (
         _normalise_version(version, "for --version") if version is not None else None
     )

@@ -33,13 +33,14 @@ from typing import Optional
 import typer
 
 from g3dt import config
+from g3dt import contexts as _contexts
 from g3dt.config import (
     dictionary_filename,
     dictionary_url,
     dictionary_version_of,
     script_env,
 )
-from g3dt.cli._internal import runner, safety
+from g3dt.cli._internal import resolve, runner, safety
 from g3dt.cli._internal.resolve import env_of
 from g3dt.cli.dict_cmds import SCHEMA_DIR, warn_if_overridden
 
@@ -185,7 +186,7 @@ def _check_batch_matches_env(batch_dir: Path, e, ver: str, allow_mismatch: bool)
 @app.command()
 def deploy(
     env: str = typer.Option(
-        "test", "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
     ),
     llm_provider: Optional[str] = typer.Option(
         None, "--llm-provider",
@@ -272,6 +273,14 @@ def deploy(
       g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100 --skip-dict
       g3dt synth deploy -e test --studies "s1,s2" -n "100,50" --prev-version v1.2.0
     """
+    if env is None:
+        try:
+            has_ctx = _contexts.resolve_context(required=False)[0] is not None
+        except Exception:
+            has_ctx = True  # let active_env surface the error cleanly below
+        if not has_ctx:
+            env = "test"   # historical default when nothing is configured
+    env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic full deploy", env)
     effective_studies = studies or DEPLOY_DEFAULT_STUDIES
@@ -316,7 +325,7 @@ def generate(
         help="Simulated study id(s); comma-separated for many, e.g. AusDiab_Simulated.",
     ),
     env: str = typer.Option(
-        "test", "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
     ),
     num_records: str = typer.Option(
         None,
@@ -368,6 +377,14 @@ def generate(
       g3dt synth generate dataset_a --llm --llm-model gpt-4o-mini \
           --llm-api-key-file ~/keys/openai_api_key.txt
     """
+    if env is None:
+        try:
+            has_ctx = _contexts.resolve_context(required=False)[0] is not None
+        except Exception:
+            has_ctx = True  # let active_env surface the error cleanly below
+        if not has_ctx:
+            env = "test"   # historical default when nothing is configured
+    env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic generation", env)
     _check_per_study_counts(studies, num_records)
@@ -433,7 +450,7 @@ def generate(
 @app.command()
 def upload(
     env: str = typer.Option(
-        "test", "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
     ),
     version: str = typer.Option(
         None, "--version", help="Dictionary version dir (default: the env's version)."
@@ -451,6 +468,14 @@ def upload(
     them. Defaults to the env's declared version, so the common case verifies
     against what the environment actually runs.
     """
+    if env is None:
+        try:
+            has_ctx = _contexts.resolve_context(required=False)[0] is not None
+        except Exception:
+            has_ctx = True  # let active_env surface the error cleanly below
+        if not has_ctx:
+            env = "test"   # historical default when nothing is configured
+    env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic metadata upload", env)
     # A promoted dictionary (dict deploy --version) leaves SSM behind, so an
@@ -473,7 +498,7 @@ def upload(
 @app.command()
 def delete(
     env: str = typer.Option(
-        "test", "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
     ),
     projects: str = typer.Option(
         None, "--projects", "-p", help="Comma-separated simulated project ids."
@@ -485,6 +510,14 @@ def delete(
     ),
 ) -> None:
     """Delete previously-uploaded synthetic metadata from Gen3."""
+    if env is None:
+        try:
+            has_ctx = _contexts.resolve_context(required=False)[0] is not None
+        except Exception:
+            has_ctx = True  # let active_env surface the error cleanly below
+        if not has_ctx:
+            env = "test"   # historical default when nothing is configured
+    env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic metadata deletion", env)
     order = import_order or "DataImportOrder.txt"
@@ -510,4 +543,32 @@ def install_simulator() -> None:
     # without it pip leaves an existing (stale) install untouched.
     runner.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "gen3-metadata-simulator"]
+    )
+
+
+@app.command(name="set-key")
+def set_key(
+    path: str = typer.Argument(
+        ..., help="Path to the file holding your LLM API key."
+    ),
+) -> None:
+    """Remember where your LLM API key lives (for --llm generation).
+
+    Writes ``llm_api_key_file`` into the local g3dt.yaml marker — the key
+    itself never leaves the file you name. This replaces the deprecated
+    ``g3dt config set llm_api_key_file <path>``.
+    """
+    resolve.announce_context()
+    resolved = Path(path).expanduser()
+    if not resolved.is_file():
+        typer.secho(
+            f"No file at {resolved} — create it first (it should contain "
+            f"only the API key).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    old, new, marker = config.set_marker_value("llm_api_key_file", str(resolved))
+    typer.secho(
+        f"LLM key file: {old or '(unset)'} -> {new} ({marker})",
+        fg=typer.colors.GREEN,
     )

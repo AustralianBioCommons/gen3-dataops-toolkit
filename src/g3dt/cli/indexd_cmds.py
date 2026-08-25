@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import typer
 
-from g3dt.cli._internal import dispatch, runner
+from g3dt.cli._internal import dispatch, resolve, runner
 from g3dt.cli._internal.dispatch import Target
 from g3dt.cli._internal.resolve import env_of, study_of
 
@@ -29,7 +29,7 @@ def register(
         ..., "--s3-paths", help="One or more S3 prefixes to scan (repeatable)."
     ),
     study: str = typer.Option(..., "--study", "-s", help="Study, e.g. edcad."),
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Scan + write file_metadata only; skip indexd."
     ),
@@ -49,6 +49,7 @@ def register(
       g3dt indexd register --s3-paths s3://bucket/edcad/ --study edcad --env staging
       g3dt indexd register --s3-paths s3://b/a/ --s3-paths s3://b/c/ --study edcad --env staging --on ec2
     """
+    env = resolve.active_env(env)
     s = study_of(study, env)
 
     def build_args(env_name):
@@ -82,7 +83,7 @@ def check_download(
         help="Object GUIDs, e.g. PREFIX/<uuid>. Omit to sample the most "
              "recently registered objects from the indexd registry.",
     ),
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     limit: int = typer.Option(
         25, "--limit", "-n",
         help="How many objects to sample when no GUIDs are given.",
@@ -112,6 +113,7 @@ def check_download(
       g3dt indexd check-download --env staging --limit 50
       g3dt indexd check-download --env prod PREFIX/aaa PREFIX/bbb
     """
+    env = resolve.active_env(env)
     # Validate the env before spawning a subprocess: an unknown env should
     # fail here with the config error, not deep inside the script.
     e = env_of(env)

@@ -12,6 +12,7 @@ import time
 import typer
 
 from g3dt import config
+from g3dt.cli._internal import resolve
 from g3dt.cli._internal.resolve import env_of
 from g3dt.upload.metadata_submitter import create_boto3_session
 
@@ -39,7 +40,7 @@ def _session(e):
 
 @app.command()
 def up(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     wait: bool = typer.Option(
         True, "--wait/--no-wait", help="Wait until the box registers with SSM."
     ),
@@ -51,6 +52,7 @@ def up(
     re-provision. Normal access is SSM (no SSH); a session command is printed
     as soon as the box is reachable.
     """
+    env = resolve.active_env(env)
     e, instance_id = _resolve(env)
     session = _session(e)
     session.client("ec2").start_instances(InstanceIds=[instance_id])
@@ -81,13 +83,14 @@ def up(
 
 @app.command()
 def down(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
 ) -> None:
     """Stop the env's job box.
 
     (An idle box also stops itself: the CDK auto-stop alarm fires after 24h
     under 1% CPU.)
     """
+    env = resolve.active_env(env)
     e, instance_id = _resolve(env)
     _session(e).client("ec2").stop_instances(InstanceIds=[instance_id])
     typer.secho(f"Stop requested for {instance_id}.", fg=typer.colors.GREEN)
@@ -95,9 +98,10 @@ def down(
 
 @app.command()
 def status(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
 ) -> None:
     """Show the box's EC2 state and SSM reachability."""
+    env = resolve.active_env(env)
     e, instance_id = _resolve(env)
     session = _session(e)
     resp = session.client("ec2").describe_instances(InstanceIds=[instance_id])

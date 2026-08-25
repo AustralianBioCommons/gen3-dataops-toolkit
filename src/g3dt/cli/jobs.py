@@ -5,7 +5,7 @@ from typing import Optional
 
 import typer
 
-from g3dt.cli._internal import dispatch, registry
+from g3dt.cli._internal import dispatch, registry, resolve
 
 app = typer.Typer(no_args_is_help=True, help="Track EC2-dispatched jobs.")
 
@@ -24,6 +24,7 @@ def _status_color(state: str) -> str:
 @app.command(name="list")
 def list_runs() -> None:
     """List recorded EC2 dispatches (most recent first)."""
+    resolve.announce_context()
     runs = registry.all_runs()
     if not runs:
         typer.echo("No dispatched runs recorded.")
@@ -43,6 +44,7 @@ def status(
     ),
 ) -> None:
     """Show SSM status for one run, or all recorded runs if no run id is given."""
+    resolve.announce_context()
     if run_id is None:
         runs = registry.all_runs()
         if not runs:
@@ -71,6 +73,7 @@ def status(
 @app.command()
 def stop(run_id: str = typer.Argument(..., help="Run id from dispatch.")) -> None:
     """Stop (cancel) a running EC2-dispatched job."""
+    resolve.announce_context()
     dispatch.stop(run_id)
 
 
@@ -80,4 +83,5 @@ def logs(
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream new output as it arrives."),
 ) -> None:
     """Print (and optionally follow) the CloudWatch logs for a dispatched run."""
+    resolve.announce_context()
     dispatch.logs(run_id, follow=follow)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import typer
 
 from g3dt import config
+from g3dt.cli._internal import resolve
 from g3dt.utils import release_writer
 
 app = typer.Typer(no_args_is_help=True, help="Write/inspect dbt data releases.")
@@ -19,7 +20,7 @@ app = typer.Typer(no_args_is_help=True, help="Write/inspect dbt data releases.")
 
 @app.command()
 def write(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     data_release_version: str = typer.Option(
         ...,
         "--data-release-version",
@@ -40,6 +41,7 @@ def write(
     Idempotent: a (release_tag, model, db) row that already exists is skipped,
     so re-running the same tag is safe.
     """
+    env = resolve.active_env(env)
     from g3dt import resolver
 
     marker = config.load_marker()

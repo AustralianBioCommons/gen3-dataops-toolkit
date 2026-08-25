@@ -15,7 +15,7 @@ from typing import Optional
 import typer
 
 from g3dt.config import dictionary_filename, dictionary_url, script_env
-from g3dt.cli._internal import runner
+from g3dt.cli._internal import resolve, runner
 from g3dt.cli._internal.resolve import env_of
 
 app = typer.Typer(no_args_is_help=True, help="Data dictionary operations (local).")
@@ -48,7 +48,7 @@ def warn_if_overridden(env_cfg, version: Optional[str]) -> None:
 
 @app.command()
 def pull(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),
@@ -62,6 +62,7 @@ def pull(
       g3dt dict pull --env test
       g3dt dict pull --env staging --version v1.1.5
     """
+    env = resolve.active_env(env)
     e = env_of(env)
     warn_if_overridden(e, version)
     v = _version(e, version)
@@ -77,12 +78,13 @@ def pull(
 
 @app.command()
 def upload(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),
 ) -> None:
     """Upload the (already pulled) dictionary JSON to the env's S3 location."""
+    env = resolve.active_env(env)
     e = env_of(env)
     warn_if_overridden(e, version)
     v = _version(e, version)
@@ -99,7 +101,7 @@ def upload(
 
 @app.command()
 def deploy(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),
@@ -126,6 +128,7 @@ def deploy(
       g3dt dict deploy --env test --version v1.1.7
       g3dt dict deploy --env staging --version v1.1.7   # promote the same tag
     """
+    env = resolve.active_env(env)
     e = env_of(env)
     warn_if_overridden(e, version)
     env_vars = script_env(e, _version(e, version))

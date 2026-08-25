@@ -27,6 +27,21 @@ app = typer.Typer(
     help="Gen3 DataOps toolkit. Run [bold]g3dt docs[/bold] for an overview.",
 )
 
+
+@app.callback()
+def _root(
+    ctx_name: str = typer.Option(
+        None,
+        "--ctx",
+        help="One-shot context override, e.g. myproj/staging "
+             "(see `g3dt config contexts`).",
+    ),
+) -> None:
+    """Record the global --ctx override before any sub-command runs."""
+    from g3dt import contexts
+
+    contexts.set_override(ctx_name)
+
 app.add_typer(dict_cmds.app, name="dict")
 app.add_typer(synth.app, name="synth")
 app.add_typer(metadata.app, name="metadata")
@@ -45,12 +60,23 @@ Gen3 DataOps toolkit (g3dt) — operations overview
 =================================================
 
 Configuration: two kinds, nothing else
-  - INPUTS live in the CDK repo (gen3-aws-data-pipeline) as
-    config/<project>.<env>.json, read only by `cdk deploy`.
+  - INPUTS live in your deployment wrapper repo as config/<project>.<env>.json,
+    read only by `cdk deploy` (via the aws-gen3-pipeline template).
   - Everything else is resolved live from SSM (/{project}/{env}/...), which
-    `cdk deploy` publishes. The only local file is the g3dt.yaml marker
-    (project/region/default_env, optional profiles:/studies: maps), searched
-    at ./g3dt.yaml, ~/.g3dt/g3dt.yaml, /etc/g3dt/g3dt.yaml.
+    `cdk deploy` publishes. The only local file is the g3dt.yaml marker,
+    searched at ./g3dt.yaml, ~/.g3dt/g3dt.yaml, /etc/g3dt/g3dt.yaml.
+
+Contexts: what am I pointed at?
+  A context is a named (project, env, profile, region) tuple. Every command
+  prints the active one first (to stderr) — read that line before anything
+  else. Production contexts are marked [PROD] and gate destructive actions
+  behind typing the context name; --yes never bypasses that.
+    g3dt config discover --all-profiles --add   find + register deployed infra
+    g3dt config contexts                        list them (current marked *)
+    g3dt config use <name>                      act there from now on
+    g3dt --ctx <name> <command>                 one-shot override
+  Legacy markers (project/default_env/profiles keys) keep working unchanged;
+  `--env <name>` selects the matching context.
 
 Mental model: two execution planes
   - Control plane (LOCAL): dict deploy, k8s restarts. These use the interactive
@@ -63,9 +89,10 @@ Mental model: two execution planes
 Discover everything
   g3dt --help                      list all command groups
   g3dt <group> --help              commands + options for a group
+  g3dt config contexts             your contexts (current marked *)
   g3dt config envs                 environments with a deployed SSM tree
   g3dt config studies              studies from your g3dt.yaml marker
-  g3dt config show --env test      resolved settings (safe, read-only)
+  g3dt config show                 resolved settings for the current context
 
 Typical release runbook (staging shown; repeat for prod with care)
   1. g3dt dict deploy   --env staging
@@ -110,12 +137,18 @@ data-v* tag = release) and watched with `g3dt pipeline status|logs`.
 @app.command()
 def docs() -> None:
     """Print the operations overview (mental model, runbook, prerequisites)."""
+    from g3dt.cli._internal import resolve
+
+    resolve.announce_context()
     typer.echo(_DOCS)
 
 
 @app.command()
 def version() -> None:
     """Print the installed gen3-dataops-toolkit version."""
+    from g3dt.cli._internal import resolve
+
+    resolve.announce_context()
     try:
         from importlib.metadata import version as _v
 

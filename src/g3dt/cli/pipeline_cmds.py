@@ -13,6 +13,7 @@ from typing import Optional
 import typer
 
 from g3dt import config
+from g3dt.cli._internal import resolve
 from g3dt.upload.metadata_submitter import create_boto3_session
 
 app = typer.Typer(no_args_is_help=True, help="Watch the dbt CodePipeline/CodeBuild.")
@@ -36,7 +37,7 @@ def _resolved(env: str):
 
 @app.command()
 def status(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     which: str = typer.Option(
         "writeReleaseInfo",
         "--which",
@@ -44,6 +45,7 @@ def status(
     ),
 ) -> None:
     """Show the latest execution state per stage of the pipeline."""
+    env = resolve.active_env(env)
     try:
         rc, session = _resolved(env)
     except config.ConfigError as exc:
@@ -67,7 +69,7 @@ def status(
 
 @app.command()
 def logs(
-    env: str = typer.Option(..., "--env", "-e", help="Environment, e.g. test."),
+    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
     which: str = typer.Option(
         "dbtReleaseBuilder",
         "--which",
@@ -82,6 +84,7 @@ def logs(
     project name comes from SSM ``codebuild/*``. The follow loop is the same
     filter_log_events + de-dup pattern as `g3dt jobs logs`.
     """
+    env = resolve.active_env(env)
     try:
         rc, session = _resolved(env)
     except config.ConfigError as exc:

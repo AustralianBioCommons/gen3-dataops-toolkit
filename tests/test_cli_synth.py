@@ -26,8 +26,20 @@ runner = CliRunner()
 def _isolated_marker(tmp_path, monkeypatch):
     """Keep tests hermetic: the LLM key-file fallback reads the marker, and a
     developer's real ~/.g3dt/g3dt.yaml (with llm_api_key_file set) would
-    otherwise leak into the asserted subprocess env."""
-    monkeypatch.setenv("G3DT_MARKER", str(tmp_path / "no-marker.yaml"))
+    otherwise leak into the asserted subprocess env.
+
+    The marker carries only project + region: enough for the context banner to
+    resolve an acting context (every command now does that before its patched
+    env_of seam runs), while still guaranteeing no llm_api_key_file leaks in.
+    """
+    from g3dt import config
+
+    marker = tmp_path / "g3dt.yaml"
+    marker.write_text("project: etl\nregion: ap-southeast-2\n")
+    monkeypatch.setenv("G3DT_MARKER", str(marker))
+    config._load_yaml_cached.cache_clear()
+    yield
+    config._load_yaml_cached.cache_clear()
 
 
 def _env_cfg(name: str, llm_model: str = "ssm-model") -> EnvConfig:
