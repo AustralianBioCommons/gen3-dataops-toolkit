@@ -20,6 +20,7 @@ from g3dt.cli import (
     metadata,
     pipeline_cmds,
     release_cmds,
+    study_cmds,
     synth,
 )
 
@@ -49,6 +50,7 @@ def _root(
 
 app.add_typer(dict_cmds.app, name="dict")
 app.add_typer(synth.app, name="synth")
+app.add_typer(study_cmds.app, name="study")
 app.add_typer(metadata.app, name="metadata")
 app.add_typer(delete_cmds.app, name="delete")
 app.add_typer(k8s.app, name="k8s")
@@ -64,12 +66,15 @@ _DOCS = """\
 Gen3 DataOps toolkit (g3dt) — operations overview
 =================================================
 
-Configuration: two kinds, nothing else
+Configuration: three kinds, nothing else
   - INPUTS live in your deployment wrapper repo as config/<project>.<env>.json,
     read only by `cdk deploy` (via the aws-gen3-pipeline template).
-  - Everything else is resolved live from SSM (/{project}/{env}/...), which
+  - OUTPUTS are resolved live from SSM (/{project}/{env}/...), which
     `cdk deploy` publishes. The only local file is the g3dt.yaml marker,
     searched at ./g3dt.yaml, ~/.g3dt/g3dt.yaml, /etc/g3dt/g3dt.yaml.
+  - OPERATIONAL state is written by the toolkit itself: the study registry
+    (SSM /{project}/{env}/studies/*, managed with `g3dt study`) and the
+    Iceberg ledgers (releases, upload receipts, indexd registry).
 
 Contexts: what am I pointed at?
   A context is a named (project, env, profile, region) tuple. Every command
@@ -97,14 +102,18 @@ Discover everything
   g3dt config contexts             your contexts (current marked *; add
                                    --verify to check what is deployed)
   g3dt config envs                 environments with a deployed SSM tree
-  g3dt config studies              studies from your g3dt.yaml marker
+  g3dt study list                  the env's study registry (config studies
+                                   is an alias)
   g3dt config show                 resolved settings for the current context
 
 Typical release runbook (staging shown; repeat for prod with care)
   1. g3dt dict deploy   --env staging
-  2. g3dt metadata upload --study <study> --env staging --on ec2
-  3. g3dt jobs logs <run-id> --follow
-  4. g3dt k8s restart-etl --env staging
+  2. g3dt study repoint --latest --env staging   point the registry at the
+                                                 newest release (validates
+                                                 every target first)
+  3. g3dt metadata upload --study <study> --env staging --on ec2
+  4. g3dt jobs logs <run-id> --follow
+  5. g3dt k8s restart-etl --env staging
 
 Promoting one dictionary across environments
   The source repo/path are env inputs; usually only the tag changes, and it

@@ -11,7 +11,7 @@ python register_indexd.py \
     --study edcad \
     --env staging
 
-Studies come from the g3dt.yaml marker or s3://<metadata-bucket>/config/studies.yaml.
+Studies come from the env's SSM registry (/{project}/{env}/studies/*, managed by `g3dt study`).
 """
 
 import sys
@@ -93,7 +93,7 @@ def main():
     args = parser.parse_args()
 
     # Env facts + resource names from SSM; the study registry from the marker
-    # or s3://<metadata-bucket>/config/studies.yaml.
+    # (SSM /{project}/{env}/studies/*; legacy studies.yaml fallback until 5.0).
     try:
         env_cfg = g3dt_config.resolve_env(args.env)
         study_cfg = g3dt_config.resolve_study(args.study, args.env)

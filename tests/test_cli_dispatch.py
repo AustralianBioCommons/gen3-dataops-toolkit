@@ -30,11 +30,6 @@ project: etl
 region: ap-southeast-2
 profiles:
   staging: etl_staging
-studies:
-  ausdiab_staging:
-    project_id: AusDiab
-    program_id: program1
-    s3_metadata_path: s3://b/staging/ausdiab/
 """
 
 
@@ -66,10 +61,19 @@ def _env(tmp_path, monkeypatch):
 
 
 def _seed_env(instance_id="i-0abc123"):
-    """Publish the /etl/staging tree (app facts + ec2 leaves) into mocked SSM."""
+    """Publish the /etl/staging tree (app facts + ec2 leaves) into mocked SSM.
+
+    Includes a ``studies/ausdiab`` registry parameter (the 4.1.0 SSM-backed
+    registry) so ``metadata upload``/``delete`` resolve their study the same
+    way production does — the marker's ``studies:`` block is no longer read.
+    """
     ssm = boto3.client("ssm", region_name=REGION)
     leaves = {
         "meta/region": REGION,
+        "studies/ausdiab": (
+            '{"project_id": "AusDiab", "program_id": "program1", '
+            '"s3_metadata_path": "s3://b/staging/ausdiab/"}'
+        ),
         "app/dictionary_version": "v1",
         "app/aws_secret_name": "sec",
         "app/schema_s3_uri": "u",

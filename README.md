@@ -46,8 +46,11 @@ confirmation, and destructive actions on them require typing the context
 name — `--yes` never bypasses that.
 
 The marker can also be written by hand (design doc:
-`docs/design/contexts.md`); the study registry lives either in a top-level
-`studies:` block or per env at `s3://<metadata-bucket>/config/studies.yaml`.
+`docs/design/contexts.md`). The study registry lives in the env's SSM tree
+(`/{project}/{env}/studies/<name>`, one JSON parameter per study — manage
+it with `g3dt study`; design doc `docs/design/studies.md`). The legacy
+per-env `s3://<metadata-bucket>/config/studies.yaml` is a deprecation-
+warned read fallback until 5.0 — import it with `g3dt study migrate`.
 Search order: `./g3dt.yaml` → `~/.g3dt/g3dt.yaml` → `/etc/g3dt/g3dt.yaml`
 (the EC2 job box's copy, written by CDK user-data). Legacy markers
 (`project`/`default_env`/`profiles:` keys) keep working unchanged, as do the
@@ -58,6 +61,7 @@ the file-less CodeBuild/EC2 path.
 
 ```bash
 g3dt config show                 # every resolved name — the safety check
+g3dt study repoint --latest      # point the registry at the newest release
 g3dt ec2 up                      # start the context's job box (SSM-managed)
 g3dt metadata upload --study mystudy --on ec2
 g3dt jobs logs <run-id> --follow # live logs; laptop can sleep, job keeps going

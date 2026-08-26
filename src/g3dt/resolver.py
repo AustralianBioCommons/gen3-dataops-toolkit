@@ -9,6 +9,9 @@ else in the toolkit ever hard-codes an AWS resource name.
 The tree's exact shape is enforced on the infrastructure side by the CDK repo's
 drift-guard test (``test/ssm-publishing.test.ts``): 38 parameters from the SSM
 stack plus ``ec2/instanceId`` published by the EC2 stack (39 total).
+The ``studies/*`` subtree is the exception: OPERATIONAL state written by
+``g3dt study`` (never by deploy), riding along in the same recursive fetch
+(:mod:`g3dt.studies`, docs/design/studies.md).
 """
 from __future__ import annotations
 

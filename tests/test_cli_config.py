@@ -6,9 +6,10 @@ env's SSM tree. The riskiest rule is the ``{study}_{env_base}`` derivation: a
 wrong mapping could push *staging* data to a *prod* location, so each case
 states its input and expected output explicitly.
 
-Environments resolve from SSM (mocked with moto); studies resolve from the
-local ``g3dt.yaml`` marker (passed as a dict here, exactly as ``load_marker``
-returns it).
+Environments resolve from SSM (mocked with moto). Since 4.1.0 studies do
+too: one JSON parameter per study under ``/{project}/{env}/studies/`` — the
+env lives in the SSM path, which is what keeps staging data out of prod
+(the old ``{study}_{env}`` key-suffix rule these tests used to pin).
 """
 import boto3
 import pytest
@@ -21,25 +22,30 @@ REGION = "ap-southeast-2"
 
 @pytest.fixture
 def marker():
-    """A minimal but realistic marker dict (staging + prod studies, profiles)."""
+    """A minimal but realistic marker dict (project + region only).
+
+    No ``studies:`` block: the marker registry was removed in 4.1.0 — the
+    per-env SSM subtree seeded by ``_seed_study`` is the registry now.
+    """
     return {
         "project": "etl",
         "region": REGION,
         "default_env": "staging",
         "profiles": {"staging": "etl_staging"},
-        "studies": {
-            "ausdiab_staging": {
-                "project_id": "AusDiab",
-                "program_id": "program1",
-                "s3_metadata_path": "s3://b/staging/ausdiab/",
-            },
-            "ausdiab_prod": {
-                "project_id": "AusDiab",
-                "program_id": "program1",
-                "s3_metadata_path": "s3://b/prod/ausdiab/",
-            },
-        },
     }
+
+
+def _seed_study(project: str, env: str, name: str, path: str) -> None:
+    """Register one study the 4.1.0 way: a JSON blob parameter in SSM."""
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(
+        Name=f"/{project}/{env}/studies/{name}",
+        Value=(
+            '{"project_id": "AusDiab", "program_id": "program1", '
+            f'"s3_metadata_path": "{path}"}}'
+        ),
+        Type="String",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +61,15 @@ def _isolated(monkeypatch, tmp_path):
     empty = tmp_path / "g3dt.yaml"
     empty.write_text("project: etl\nregion: ap-southeast-2\n")
     monkeypatch.setenv("G3DT_MARKER", str(empty))
+    # The marker fixture names profile etl_staging; define it in a scratch
+    # credentials file so boto3.Session(profile_name=...) resolves — moto
+    # then intercepts every API call regardless of profile.
+    creds = tmp_path / "aws_credentials"
+    creds.write_text(
+        "[etl_staging]\naws_access_key_id = testing\naws_secret_access_key = testing\n"
+    )
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws_config"))
     config._load_yaml_cached.cache_clear()
     resolver.resolve.cache_clear()
     yield
@@ -82,7 +97,7 @@ def _seed_env(project: str, env: str, instance_id: str = "i-123") -> None:
 
 
 # --------------------------------------------------------------------------- #
-# env_base + studies (pure marker logic, no AWS)                               #
+# env_base + studies (SSM-backed registry, moto)                               #
 # --------------------------------------------------------------------------- #
 def test_env_base_strips_ec2_suffix():
     """Input: 'staging_ec2' / 'staging' -> Expected: both base to 'staging'."""
@@ -90,36 +105,76 @@ def test_env_base_strips_ec2_suffix():
     assert config.env_base("staging") == "staging"
 
 
-def test_resolve_study_derives_env_specific_key(marker):
-    """Input: study 'ausdiab', env 'staging' -> key 'ausdiab_staging', staging path."""
+@mock_aws
+def test_resolve_study_reads_env_scoped_ssm(marker):
+    """Input: study 'ausdiab', env 'staging' -> the staging subtree's record.
+
+    The key is the BARE name — the environment is the SSM path, not a
+    suffix.
+    """
+    _seed_env("etl", "staging")
+    _seed_study("etl", "staging", "ausdiab", "s3://b/staging/ausdiab/")
     s = config.resolve_study("ausdiab", "staging", marker)
-    assert s.key == "ausdiab_staging"
+    assert s.key == "ausdiab"
     assert s.s3_metadata_path.endswith("/staging/ausdiab/")
 
 
-def test_resolve_study_ec2_env_maps_to_base_study_key(marker):
-    """Input: study 'ausdiab', env 'staging_ec2' -> Expected: still 'ausdiab_staging'."""
+@mock_aws
+def test_resolve_study_ec2_env_maps_to_base_tree(marker):
+    """Input: env 'staging_ec2' -> Expected: the staging subtree's record."""
+    _seed_env("etl", "staging")
+    _seed_study("etl", "staging", "ausdiab", "s3://b/staging/ausdiab/")
     s = config.resolve_study("ausdiab", "staging_ec2", marker)
-    assert s.key == "ausdiab_staging"
+    assert s.key == "ausdiab"
 
 
+@mock_aws
 def test_resolve_study_prod_is_separate_from_staging(marker):
-    """Safety: env 'prod' must resolve to the prod path, never the staging one."""
+    """Safety: the same study name resolves per-env, staging never leaks to prod.
+
+    Both trees register 'ausdiab'; the env picks the tree, so a prod lookup
+    can only ever see the prod path.
+    """
+    _seed_env("etl", "staging")
+    _seed_env("etl", "prod")
+    _seed_study("etl", "staging", "ausdiab", "s3://b/staging/ausdiab/")
+    _seed_study("etl", "prod", "ausdiab", "s3://b/prod/ausdiab/")
     s = config.resolve_study("ausdiab", "prod", marker)
-    assert s.key == "ausdiab_prod"
+    assert s.key == "ausdiab"
     assert "/prod/" in s.s3_metadata_path
 
 
 @mock_aws
-def test_resolve_study_unknown_raises_with_valid_list(marker):
-    """Unknown study -> ConfigError that names the valid studies (acts as help)."""
+def test_resolve_study_accepts_legacy_suffixed_wire_form(marker):
+    """Input: 'ausdiab_staging' (the pre-4.1 wire form service scripts pass).
+
+    Background: the CLI used to hand dispatched scripts the suffixed key;
+    those scripts re-resolve it. The suffix-stripping candidate keeps that
+    wire protocol working with zero script edits.
+    """
+    _seed_env("etl", "staging")
+    _seed_study("etl", "staging", "ausdiab", "s3://b/staging/ausdiab/")
+    s = config.resolve_study("ausdiab_staging", "staging", marker)
+    assert s.key == "ausdiab"
+
+
+@mock_aws
+def test_resolve_study_unknown_lists_real_names(marker):
+    """Unknown study -> ConfigError naming the registered studies + a hint."""
+    _seed_env("etl", "staging")
+    _seed_study("etl", "staging", "ausdiab", "s3://b/staging/ausdiab/")
     with pytest.raises(config.ConfigError) as exc:
-        config.resolve_study("nope", "staging", marker)
-    assert "Valid studies" in str(exc.value)
+        config.resolve_study("ausdib", "staging", marker)
+    assert "Registered: ausdiab" in str(exc.value)
+    assert "Did you mean 'ausdiab'" in str(exc.value)
 
 
-def test_list_studies_strips_env_suffix(marker):
-    assert config.list_studies(marker) == ["ausdiab"]
+@mock_aws
+def test_list_studies_reads_env_registry(marker):
+    _seed_env("etl", "staging")
+    _seed_study("etl", "staging", "ausdiab", "s3://b/staging/ausdiab/")
+    assert config.list_studies(marker, env="staging") == ["ausdiab"]
+    assert config.list_studies(marker) == []  # no env -> no registry
 
 
 # --------------------------------------------------------------------------- #

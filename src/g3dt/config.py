@@ -25,9 +25,12 @@ Design notes
 ------------
 * ``resolve_env`` returns the same frozen :class:`EnvConfig` the pre-2.0 CLI
   used, so command groups and services are agnostic to where values came from.
-* Studies are project data, not CDK-created names, so they stay in the marker
-  (``studies:`` block) for now. ``resolve_study`` keeps the safety-critical
-  ``{study}_{env_base}`` derivation that keeps staging data out of prod.
+* Studies are OPERATIONAL state (4.1.0): one SSM parameter per study at
+  ``/{project}/{env}/studies/<name>``, written by ``g3dt study`` and read via
+  the same cached SSM round-trip as everything else (:mod:`g3dt.studies`,
+  design doc docs/design/studies.md). The tree path replaces the old
+  ``{study}_{env_base}`` key-suffix safety rule; a legacy S3 ``studies.yaml``
+  read fallback remains (deprecation-warned) until 5.0.
 """
 from __future__ import annotations
 
@@ -101,11 +104,13 @@ FILE_METADATA_TABLE = "file_metadata"
 INDEXD_REGISTRY_TABLE = "indexd_registry"
 INDEXD_PREFIX = "indexd/"
 
-#: Where a project's study registry lives when it isn't in the local marker:
-#: s3://<metadata-bucket>/<STUDIES_S3_KEY> (see resolve_study).
+#: Where the LEGACY (pre-4.1) study registry lived:
+#: s3://<metadata-bucket>/<STUDIES_S3_KEY>. Read-only fallback until 5.0;
+#: `g3dt study migrate` imports it into SSM and retires the file.
 STUDIES_S3_KEY = "config/studies.yaml"
 
-#: Suffixes used to strip the environment from a study key.
+#: Env suffixes of the LEGACY study-key convention ({study}_{env}). Still
+#: recognised on lookup (wire compat) and rejected on write (g3dt study add).
 _STUDY_ENV_SUFFIXES = ("_staging", "_prod", "_test")
 
 
@@ -632,11 +637,15 @@ def script_env(e: EnvConfig, version: Optional[str] = None) -> Dict[str, str]:
 
 
 # --------------------------------------------------------------------------- #
-# Studies (project data — marker-resident for now)                             #
+# Studies (OPERATIONAL state — SSM /{project}/{env}/studies/*, g3dt.studies)  #
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class StudyConfig:
-    """Resolved settings for one study (in a given environment)."""
+    """Resolved settings for one study (in a given environment).
+
+    ``key`` is the BARE study name since 4.1.0 (``cdah``, never
+    ``cdah_staging``) — the environment lives in the SSM path, not the name.
+    """
 
     key: str
     project_id: str
@@ -645,25 +654,26 @@ class StudyConfig:
 
 
 def list_studies(marker: Optional[dict] = None, env: Optional[str] = None) -> List[str]:
-    """Return unique bare study names (env suffix stripped) for friendly help."""
+    """Bare study names registered for ``env`` (SSM first, legacy S3 fallback).
+
+    Without ``env`` there is no registry to consult (the marker's
+    ``studies:`` block is no longer read) — returns ``[]``.
+    """
+    if env is None:
+        return []
+    from g3dt import studies as _studies
+
     m = marker if marker is not None else load_marker()
-    studies = m.get("studies") or {}
-    if not studies and env:
-        studies = _studies_from_s3(env, m) or {}
-    prefixes = set()
-    for key in studies:
-        for suffix in _STUDY_ENV_SUFFIXES:
-            if key.endswith(suffix):
-                prefixes.add(key[: -len(suffix)])
-                break
-        else:
-            prefixes.add(key)
-    return sorted(prefixes)
+    registry, _source, _fallback = _studies.registry_for_env(env, m)
+    return sorted(registry)
 
 
 @functools.lru_cache(maxsize=None)
 def _studies_from_s3_cached(project: str, base_env: str, profile: Optional[str]) -> dict:
-    """Fetch the project's study registry from S3 (see STUDIES_S3_KEY)."""
+    """Fetch the LEGACY study registry from S3 (fallback only; see STUDIES_S3_KEY).
+
+    Tests clear via ``_studies_from_s3_cached.cache_clear()`` (conftest does).
+    """
     import boto3
     from botocore.exceptions import ClientError
 
@@ -685,7 +695,12 @@ def _studies_from_s3_cached(project: str, base_env: str, profile: Optional[str])
 
 
 def _studies_from_s3(env: str, marker: dict) -> dict:
-    """Best-effort S3 fallback for the study registry (empty dict on any miss)."""
+    """Best-effort read of the LEGACY S3 registry (empty dict on any miss).
+
+    Only called AFTER the env's SSM tree resolved successfully, so swallowing
+    here can only ever hide "no legacy file" — never an auth failure (those
+    surface from the SSM read first).
+    """
     try:
         project = require_project(marker)
         base = env_base(env)
@@ -699,31 +714,28 @@ def _studies_from_s3(env: str, marker: dict) -> dict:
 def resolve_study(study: str, env: str, marker: Optional[dict] = None) -> StudyConfig:
     """Resolve a study against an environment.
 
-    The registry comes from the marker's ``studies:`` map if present, else from
-    ``s3://<metadata-bucket>/config/studies.yaml`` (so the EC2 job box — whose
-    marker carries only the bootstrap — resolves the same registry the laptop
-    does; upload it once per env with ``aws s3 cp``).
+    The registry is the env's SSM ``studies/`` subtree (written by
+    ``g3dt study``); when that is empty, the legacy
+    ``s3://<metadata-bucket>/config/studies.yaml`` is read as a
+    deprecation-warned fallback (removed in 5.0). The marker's ``studies:``
+    block is no longer read (4.1.0).
 
-    Tries ``<study>_<env_base>`` first (so ``ausdiab`` + ``staging`` →
-    ``ausdiab_staging``), then the literal ``study`` key for back-compat. This
-    derivation is the safety rule that keeps staging data out of prod.
+    Lookups are case-forgiving (``CDAH`` resolves ``cdah``) and accept the
+    legacy ``{study}_{env_base}`` wire form the dispatched service scripts
+    still pass — both resolve to the same bare-named record. Environment
+    separation comes from the SSM path itself, so a staging lookup can never
+    return a prod record.
     """
+    from g3dt import studies as _studies
+
     m = marker if marker is not None else load_marker()
-    studies = m.get("studies") or {}
-    if not studies:
-        studies = _studies_from_s3(env, m) or {}
-    candidates = [f"{study}_{env_base(env)}", study]
-    for key in candidates:
-        sc = studies.get(key)
+    _studies.notice_marker_studies_once(m)
+    registry, source, used_fallback = _studies.registry_for_env(env, m)
+    if used_fallback:
+        _studies.warn_s3_fallback_once(source)
+    base = env_base(env)
+    for name in _studies.lookup_candidates(study, base):
+        sc = registry.get(name)
         if sc:
-            return StudyConfig(
-                key=key,
-                project_id=sc["project_id"],
-                program_id=sc["program_id"],
-                s3_metadata_path=sc["s3_metadata_path"],
-            )
-    valid = ", ".join(list_studies(m)) or "(none — add a studies: block to g3dt.yaml)"
-    raise ConfigError(
-        f"Study '{study}' (env '{env}') not found. Tried {candidates}. "
-        f"Valid studies: {valid}"
-    )
+            return sc
+    raise ConfigError(_studies.not_found_message(study, env, registry, source))

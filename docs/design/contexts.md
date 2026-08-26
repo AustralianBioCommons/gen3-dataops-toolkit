@@ -53,7 +53,7 @@ project: acdc          # active-project fallback + older-toolkit goodwill
 region: ap-southeast-2
 default_env: staging   # kept in sync with `current` on switch
 profiles: { ... }      # legacy; honored when contexts: is absent
-studies: { ... }       # GLOBAL (keys already env-scoped via {study}_{env_base})
+studies: { ... }       # DEAD since 4.1.0 — no longer read (see studies.md)
 ssh_key: ...           # GLOBAL, is_ec2-only consumption
 ssh_user: ...
 llm_api_key_file: ...  # GLOBAL operator secret path
@@ -61,9 +61,10 @@ llm_api_key_file: ...  # GLOBAL operator secret path
 
 Validation on load: a context `env` carrying `_ec2` is rejected; reserved names
 (`use`, `contexts`, `discover`, `add`, `forget`, `current`, `show`, `set`) are
-rejected. `studies`/`ssh_*`/`llm_api_key_file` stay global: study keys are
-already env-scoped, the per-env S3 registry is the multi-project source of
-truth, and moving them would churn `EnvConfig` across eight test files.
+rejected. `ssh_*`/`llm_api_key_file` stay global. The marker `studies:`
+block is IGNORED since 4.1.0 (a one-time stderr notice points at
+`g3dt study migrate`) — the registry lives per env in SSM
+(`/{project}/{env}/studies/*`, design doc `studies.md`).
 
 ## 4. Legacy synthesis (normative — the back-compat core)
 
@@ -134,7 +135,8 @@ plain-English intent. **No aliases, no new top-level commands.**
 | `g3dt config add <name> --project P --env E [--profile PR] [--region R] [--production]` | Explicit manual registration. |
 | `g3dt config forget <name>` | Local-only removal ("forget", deliberately — nothing in AWS is touched). Refuses `current` without `--force`. |
 | `g3dt config show` | Now defaults to the current context; `--env/--ctx/--study/--full` still accepted. |
-| `envs` / `studies` / `diff` / `dbt-env` | Unchanged names, context-aware. `dbt-env --env` and `release write --env` are accepted forever (buildspec contract). |
+| `envs` / `diff` / `dbt-env` | Unchanged names, context-aware. `dbt-env --env` and `release write --env` are accepted forever (buildspec contract). |
+| `config studies` | Alias of `g3dt study list` since 4.1.0 (the SSM registry; `studies.md`). |
 | `config set` | **Deprecated + hidden.** Still functional for the four legacy keys. Its one remaining real job moves to `g3dt synth set-key <path>`. |
 
 ## 8. Invariants (normative — each pinned by a test)
@@ -175,5 +177,6 @@ user-data may additionally write `current: {project}/{env}`.
 
 ## 11. Out of scope / future
 
-Comment-preserving marker rewrites (ruamel), per-context study registries, a
-shell-prompt helper, the user-data v2 marker.
+Comment-preserving marker rewrites (ruamel), a shell-prompt helper, the
+user-data v2 marker. (Per-env study registries shipped in 4.1.0 —
+`docs/design/studies.md`.)

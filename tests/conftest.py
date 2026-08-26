@@ -15,7 +15,22 @@ hermetic regardless of which file ran first.
 """
 import pytest
 
-from g3dt import config, contexts
+from g3dt import config, contexts, resolver, studies
+
+
+def _clear_registry_caches():
+    # The resolver and the legacy studies.yaml reader are lru_cached for the
+    # life of the process; the studies module keeps once-per-process warning
+    # flags. Without clearing all three here, study state written by one
+    # test (or a fallback warning it triggered) bleeds into the next in file
+    # order — the exact flake class this conftest exists to prevent.
+    # getattr-guarded: a test may have monkeypatched the cached function with
+    # a plain stub that has no cache_clear (teardown runs before the undo).
+    for fn in (resolver.resolve, config._studies_from_s3_cached):
+        clear = getattr(fn, "cache_clear", None)
+        if clear is not None:
+            clear()
+    studies.reset_warning_flags()
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +51,8 @@ def _reset_context_state(monkeypatch, tmp_path):
     monkeypatch.setenv("G3DT_MARKER", str(default_marker))
     config._load_yaml_cached.cache_clear()
     contexts.reset()
+    _clear_registry_caches()
     yield
     config._load_yaml_cached.cache_clear()
     contexts.reset()
+    _clear_registry_caches()

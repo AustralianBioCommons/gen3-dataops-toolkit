@@ -30,6 +30,28 @@ def study_of(study: str, env: str) -> config.StudyConfig:
     except config.ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    except Exception as exc:  # botocore auth/permission failures, guided
+        typer.secho(_aws_error_message(exc, env), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+
+def _aws_error_message(exc: Exception, env: str) -> str:
+    """A guided rendering of a raw AWS/botocore failure.
+
+    An expired SSO session used to surface as either a traceback or —
+    worse — a silent "(none)" study registry. Name the likely fix instead.
+    """
+    profile = None
+    try:
+        profile = config.aws_profile_for(env, config.load_marker())
+    except Exception:
+        pass
+    hint = (
+        f" If your SSO session expired: aws sso login --profile {profile}"
+        if profile
+        else ""
+    )
+    return f"AWS error while resolving env '{env}': {exc}.{hint}"
 
 
 def active_env(env: Optional[str]) -> str:
@@ -83,3 +105,22 @@ def rc_of(env: str):
     except config.ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    except Exception as exc:  # botocore auth/permission failures, guided
+        typer.secho(_aws_error_message(exc, env), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+
+def rc_session_of(env: str):
+    """``(rc, session)`` for ``env`` — resolved names plus an authed session.
+
+    The single idiom for commands that both read SSM names and make further
+    AWS calls (Athena, S3, SSM writes). Same credential rule as :func:`rc_of`;
+    the session's region is the resolved env's own ``meta/region``.
+    """
+    import boto3
+
+    rc = rc_of(env)
+    marker = config.load_marker()
+    profile = None if env.endswith("_ec2") else config.aws_profile_for(env, marker)
+    session = boto3.Session(profile_name=profile, region_name=rc.region)
+    return rc, session

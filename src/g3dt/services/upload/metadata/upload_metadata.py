@@ -57,7 +57,7 @@ def main():
     logger = setup_logger(debug=args.debug)
 
     # Env facts + resource names from SSM; the study registry from the marker
-    # or s3://<metadata-bucket>/config/studies.yaml.
+    # (SSM /{project}/{env}/studies/*; legacy studies.yaml fallback until 5.0).
     try:
         env_cfg = g3dt_config.resolve_env(args.env)
         study_cfg = g3dt_config.resolve_study(args.study, args.env)

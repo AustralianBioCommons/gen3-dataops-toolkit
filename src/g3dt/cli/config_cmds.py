@@ -528,36 +528,12 @@ def envs() -> None:
 
 @app.command()
 def studies(
-    env: Optional[str] = typer.Option(
-        None,
-        "--env",
-        "-e",
-        help="Read the study registry from this env's S3 bucket "
-             "(s3://<metadata-bucket>/config/studies.yaml) instead of the "
-             "local marker — this changes the data source, not just the "
-             "target.",
-    ),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
 ) -> None:
-    """List the configured studies (bare names).
+    """List the env's registered studies (alias of `g3dt study list`)."""
+    from g3dt.cli import study_cmds
 
-    The registry comes from the marker's studies: block, or — pass --env —
-    from the env's S3 registry, which is what the EC2 job box uses.
-    """
-    if env is not None:
-        env = resolve.active_env(env)
-    else:
-        resolve.announce_context()
-    names = config.list_studies(env=env)
-    if not names:
-        typer.secho(
-            "No studies configured. Add a studies: block to your g3dt.yaml "
-            "marker, or upload config/studies.yaml to the env's metadata "
-            "bucket (and pass --env).",
-            fg=typer.colors.YELLOW,
-        )
-        return
-    for name in names:
-        typer.echo(name)
+    study_cmds.list_impl(env)
 
 
 @app.command()
