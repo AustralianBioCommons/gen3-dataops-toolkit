@@ -28,7 +28,9 @@ pip install gen3-dataops-toolkit
 g3dt config discover <aws-profile> --add    # logs the profile in if needed,
                                             # lists every deployed env its
                                             # account holds, registers them
-g3dt config contexts                        # list them (current marked *)
+g3dt config contexts                        # list them (current marked *);
+                                            # offline — add --verify to check
+                                            # what each account has deployed
 g3dt config use myproj/test                 # point g3dt at one
 ```
 
@@ -209,13 +211,17 @@ step, so it asks for confirmation (decline to skip it, or pass
 `--skip-delete` to skip without prompting); on a first deploy, when no
 previous batch exists locally, deletion is skipped automatically.
 
-`deploy` without `--studies` falls back to the original ACDC demo set
-(`AusDiab_Simulated,Baker-Biobank_Simulated,BioHeart-CT_Simulated,CAUGHT-CAD_Simulated`
-at 30,60,20,55 records, previous batch `v1.0.0`) — kept for continuity; any
-other project should always pass its own `--studies`. The deploy's delete step
-targets exactly the studies being regenerated, at `--prev-version`.
+`deploy` requires `--studies`: the list scopes every step — the previous
+batch deleted (at `--prev-version`), the batch generated, and the batch
+uploaded. Stale study directories from an earlier run that happen to sit in
+the same version directory are skipped with a log line, never submitted.
+(Before 4.0.0, omitting `--studies` silently deployed a hardcoded ACDC demo
+set — wrong for every other project.)
 
 ### Kubernetes restart targets
+
+Restarts and dictionary uploads against a production context require typing
+the context name to confirm, the same gate the synth and delete commands use.
 
 `k8s restart-schema`, `k8s restart-ms`, `dict deploy`, and `synth deploy`
 restart the commons' schema microservices **serially, in a configured order**,

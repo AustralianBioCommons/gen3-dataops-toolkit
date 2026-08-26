@@ -1,6 +1,8 @@
 # Design: contexts — one obvious answer to "what am I pointed at?"
 
-Status: accepted (2026-08-25). Ships in 3.8.0. Sections marked **normative** are
+Status: accepted (2026-08-25). Ships in 3.8.0; amended 2026-08-26 for 4.0.0
+(local-first `contexts`, guidance-mode `discover`, `config current`, widened
+prod gates). Sections marked **normative** are
 contracts that tests cite.
 
 ## 1. Motivation
@@ -107,7 +109,7 @@ output line, on stderr**, exactly once per process:
 ctx acdc/staging → project=acdc env=staging profile=acdc_staging region=ap-southeast-2
 ctx acdc/prod [PROD] → project=acdc env=prod profile=acdc_prod region=ap-southeast-2
 ctx acdc/staging (remote) → project=acdc env=staging_ec2 profile=(ambient) region=ap-southeast-2
-ctx (none configured) → run 'g3dt config discover --all-profiles --add' or pass --env/--ctx
+ctx (none configured) → run 'g3dt config discover <aws-profile> --add' or pass --env/--ctx
 ```
 
 - **stderr** because `eval "$(g3dt config dbt-env ...)"` must keep a byte-clean
@@ -126,8 +128,9 @@ plain-English intent. **No aliases, no new top-level commands.**
 | Command | Purpose |
 |---|---|
 | `g3dt config use <name>` | Switch context. Prod target → loud warning + confirm. Auto-migrates a v1 marker (preserving all v1 keys). |
-| `g3dt config contexts` | List contexts: current `*`, `[PROD]`, `(legacy)` source, DEPLOYED column (one `get_parameter meta/toolkitVersion` per context; failures → `?`; `--no-verify` offline). |
-| `g3dt config discover` | Verify configured contexts. `--all-profiles`: scan every profile in `~/.aws/config`, enumerating deployed `/{project}/{env}` trees via one filtered `describe_parameters` per account. `--add`: register findings (never overwrites). Nothing scanned without an explicit flag. |
+| `g3dt config contexts` | List contexts from the local marker only — offline by default: current `*`, `[PROD]`, `(legacy)` source. `--verify` adds the DEPLOYED column (one `get_parameter meta/toolkitVersion` per context, botocore tracebacks suppressed; failures → `?` with an `aws sso login` hint). `--no-verify` stays accepted as the default's name. |
+| `g3dt config discover [PROFILE]` | Scan one AWS profile's account for deployed `/{project}/{env}` trees (one filtered `describe_parameters`), offering `aws sso login` when the session is stale — the primary flow. No arguments: print the model and the local profile list, no network. `--all-profiles`: sweep every profile (stale sessions skipped). `--add`: register findings (never overwrites). Verification of registered contexts lives in `contexts --verify`. |
+| `g3dt config current` | Print the bare current context name to stdout (script-friendly); exit 1 with guidance when none is selected. |
 | `g3dt config add <name> --project P --env E [--profile PR] [--region R] [--production]` | Explicit manual registration. |
 | `g3dt config forget <name>` | Local-only removal ("forget", deliberately — nothing in AWS is touched). Refuses `current` without `--force`. |
 | `g3dt config show` | Now defaults to the current context; `--env/--ctx/--study/--full` still accepted. |
@@ -155,6 +158,12 @@ With a named context active, the typed confirmation token is the **context
 name** (`Type 'acdc/prod' to confirm`); with only a legacy/synthetic context,
 the token remains the env name/target (preserving the pinned safety suite).
 `g3dt config use <prod-context>` warns loudly and requires confirmation.
+
+Gated commands (4.0.0): the synth lifecycle, `delete metadata`,
+`metadata upload-all` — and now `dict upload`/`dict deploy` and every
+`k8s restart-*` (the widest-blast-radius operations). `dict pull` stays
+ungated (local download); `release write` is deliberately ungated because it
+runs non-interactively in CodeBuild against real envs (section 8d).
 
 ## 10. Migration
 
