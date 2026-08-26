@@ -20,6 +20,14 @@ from g3dt import config, contexts
 
 @pytest.fixture(autouse=True)
 def _reset_context_state(monkeypatch, tmp_path):
+    # Deterministic rendering: rich force-enables ANSI color when it sees
+    # GITHUB_ACTIONS (even with no TTY), so CliRunner output on CI is full of
+    # escape codes while local runs render plain text — and substring
+    # assertions on --help output pass locally but fail on CI. NO_COLOR is
+    # the standard override rich honors; setting it here makes every test's
+    # rendered output identical in both environments.
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
     # Hermetic default marker: never let a test read the developer's real
     # ~/.g3dt/g3dt.yaml (or fail on a bare CI box that has none). Tests that
     # need a specific marker overwrite G3DT_MARKER themselves.

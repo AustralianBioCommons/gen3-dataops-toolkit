@@ -326,7 +326,12 @@ def test_deploy_requires_studies(mock_run, _env):
     """
     result = runner.invoke(app, ["synth", "deploy", "--env", "test"], input="y\n")
     assert result.exit_code == 2
-    assert "--studies" in result.output
+    # strip ANSI codes: rich styles the option name in the error panel, and
+    # under forced color a code inside '--studies' would break the match
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.output)
+    assert "--studies" in plain
     mock_run.assert_not_called()
 
 

@@ -20,9 +20,15 @@ def _rendered(result) -> str:
 
     Rich wraps option help inside a box; a phrase can be split across lines
     with `│` border characters in between, so raw substring checks fail on
-    text that IS rendered. Strip the borders, then collapse whitespace.
+    text that IS rendered. ANSI escape codes are stripped too: rich
+    force-enables color under GITHUB_ACTIONS, and codes landing inside a
+    phrase would break the match (conftest sets NO_COLOR, this is the
+    belt-and-braces). Strip both, then collapse whitespace.
     """
-    return " ".join(result.output.replace("│", " ").split())
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.output)
+    return " ".join(plain.replace("│", " ").split())
 
 
 @pytest.fixture(autouse=True)
