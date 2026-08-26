@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from pathlib import Path
+
 import typer
 
 from g3dt.cli._internal import dispatch, resolve, runner
@@ -30,15 +32,16 @@ def register(
         ..., "--s3-paths", help="One or more S3 prefixes to scan (repeatable)."
     ),
     study: str = typer.Option(..., "--study", "-s", help="Study, e.g. edcad."),
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Scan + write file_metadata only; skip indexd."
+        False, "--dry-run", "-d",
+        help="Scan + write file_metadata only; skip indexd."
     ),
     force: bool = typer.Option(
         False, "--force",
         help="Re-register files already in the registry with the same md5.",
     ),
-    on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
+    on: Target = typer.Option(Target.local, "--on", "-o", help="Run local or on ec2."),
 ) -> None:
     """Scan S3 prefixes and register the files with Gen3 indexd.
 
@@ -84,13 +87,15 @@ def check_download(
         help="Object GUIDs, e.g. PREFIX/<uuid>. Omit to sample the most "
              "recently registered objects from the indexd registry.",
     ),
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     limit: int = typer.Option(
-        25, "--limit", "-n",
+        25, "--limit", "-l",
         help="How many objects to sample when no GUIDs are given.",
     ),
-    key_path: Optional[str] = typer.Option(
-        None, "--key-path",
+    key_path: Optional[Path] = typer.Option(
+        None, "--key-path", "-k",
+        exists=True,
+        dir_okay=False,
         help="Break-glass: local Gen3 API key JSON file, instead of the "
              "env's secret.",
     ),
@@ -121,7 +126,7 @@ def check_download(
 
     args: List[str] = ["--env", e.name]
     if key_path:
-        args += ["--key-path", key_path]
+        args += ["--key-path", str(key_path)]
     if guids:
         args += list(guids)
     else:

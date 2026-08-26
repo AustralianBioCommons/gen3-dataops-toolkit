@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import time
 
+from typing import Optional
+
 import typer
 
 from g3dt import config
@@ -41,7 +43,7 @@ def _session(e):
 
 @app.command()
 def up(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     wait: bool = typer.Option(
         True, "--wait/--no-wait", help="Wait until the box registers with SSM."
     ),
@@ -84,7 +86,7 @@ def up(
 
 @app.command()
 def down(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
 ) -> None:
     """Stop the env's job box.
 
@@ -99,7 +101,7 @@ def down(
 
 @app.command()
 def status(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
 ) -> None:
     """Show the box's EC2 state and SSM reachability."""
     env = resolve.active_env(env)

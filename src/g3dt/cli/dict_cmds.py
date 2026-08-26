@@ -49,9 +49,10 @@ def warn_if_overridden(env_cfg, version: Optional[str]) -> None:
 
 @app.command()
 def pull(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    version: str = typer.Option(
-        None, "--version", help="Dictionary git tag (default: the env's version)."
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v",
+        help="Dictionary git tag (default: the env's version).",
     ),
 ) -> None:
     """Download the dictionary JSON from the env's schema repo.
@@ -79,9 +80,10 @@ def pull(
 
 @app.command()
 def upload(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    version: str = typer.Option(
-        None, "--version", help="Dictionary git tag (default: the env's version)."
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v",
+        help="Dictionary git tag (default: the env's version).",
     ),
 ) -> None:
     """Upload the (already pulled) dictionary JSON to the env's S3 location."""
@@ -102,9 +104,10 @@ def upload(
 
 @app.command()
 def deploy(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    version: str = typer.Option(
-        None, "--version", help="Dictionary git tag (default: the env's version)."
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v",
+        help="Dictionary git tag (default: the env's version).",
     ),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services",

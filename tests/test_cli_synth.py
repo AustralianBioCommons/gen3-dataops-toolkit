@@ -28,14 +28,15 @@ def _isolated_marker(tmp_path, monkeypatch):
     developer's real ~/.g3dt/g3dt.yaml (with llm_api_key_file set) would
     otherwise leak into the asserted subprocess env.
 
-    The marker carries only project + region: enough for the context banner to
-    resolve an acting context (every command now does that before its patched
-    env_of seam runs), while still guaranteeing no llm_api_key_file leaks in.
+    The marker carries project + default_env + region: enough for a context
+    to resolve (synth commands no longer fall back to a hardcoded env="test"
+    when nothing is configured — they resolve the context like every other
+    command group), while still guaranteeing no llm_api_key_file leaks in.
     """
     from g3dt import config
 
     marker = tmp_path / "g3dt.yaml"
-    marker.write_text("project: etl\nregion: ap-southeast-2\n")
+    marker.write_text("project: etl\ndefault_env: test\nregion: ap-southeast-2\n")
     monkeypatch.setenv("G3DT_MARKER", str(marker))
     config._load_yaml_cached.cache_clear()
     yield
@@ -460,3 +461,48 @@ def test_upload_without_studies_omits_projects(mock_run, _env):
     assert result.exit_code == 0, result.output
     argv = [str(a) for a in mock_run.call_args[0][0]]
     assert "--projects" not in argv
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_generate_without_any_context_errors_instead_of_assuming_test(
+    mock_run, _env, monkeypatch, tmp_path
+):
+    """
+    Inputs:  synth generate on a machine with NO marker/context and no --env.
+    Expected: exit 1 with context guidance — the command must not run.
+
+    Background: synth commands used to silently fall back to env="test" when
+    nothing was configured, unlike every other command group. A fallback env
+    is still a real environment; acting on it without the operator choosing
+    it contradicts the context model, so the fallback is gone.
+    """
+    from g3dt import config, contexts
+
+    marker = tmp_path / "empty" / "g3dt.yaml"  # does not exist
+    monkeypatch.setenv("G3DT_MARKER", str(marker))
+    config._load_yaml_cached.cache_clear()
+    contexts.reset()
+
+    result = runner.invoke(app, ["synth", "generate", "s1", "-n", "5"])
+    assert result.exit_code == 1
+    assert "No context" in result.output
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_generate_rejects_unknown_provider(mock_run, _env):
+    """
+    Inputs:  synth generate --provider llms (a typo)
+    Expected: a usage error (exit 2) listing the valid choices.
+
+    Background: --provider was a plain string, so a typo silently reached
+    gen3-metadata-simulator; the enum makes Typer reject it up front.
+    """
+    result = runner.invoke(
+        app, ["synth", "generate", "s1", "--provider", "llms"]
+    )
+    assert result.exit_code == 2
+    assert "random" in result.output and "llm" in result.output
+    mock_run.assert_not_called()

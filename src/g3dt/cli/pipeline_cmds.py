@@ -8,6 +8,7 @@ ARN or a console name.
 from __future__ import annotations
 
 import time
+from enum import Enum
 from typing import Optional
 
 import typer
@@ -21,6 +22,20 @@ app = typer.Typer(no_args_is_help=True, help="Watch the dbt CodePipeline/CodeBui
 
 #: CodeBuild build statuses that mean the build is over.
 _TERMINAL_BUILD_STATUSES = ("SUCCEEDED", "FAILED", "FAULT", "STOPPED", "TIMED_OUT")
+
+
+class Pipeline(str, Enum):
+    """CodePipelines the CDK publishes under SSM codepipeline/*."""
+
+    writeReleaseInfo = "writeReleaseInfo"
+    dbtTestAndRun = "dbtTestAndRun"
+
+
+class Build(str, Enum):
+    """CodeBuild projects the CDK publishes under SSM codebuild/*."""
+
+    dbtReleaseBuilder = "dbtReleaseBuilder"
+    dbtTestAndRun = "dbtTestAndRun"
 
 
 def _resolved(env: str):
@@ -38,14 +53,15 @@ def _resolved(env: str):
 
 @app.command()
 def status(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    which: str = typer.Option(
-        "writeReleaseInfo",
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    which: Pipeline = typer.Option(
+        Pipeline.writeReleaseInfo,
         "--which",
-        help="writeReleaseInfo | dbtTestAndRun",
+        help="Which CodePipeline to inspect.",
     ),
 ) -> None:
     """Show the latest execution state per stage of the pipeline."""
+    which = which.value
     env = resolve.active_env(env)
     try:
         rc, session = _resolved(env)
@@ -70,11 +86,11 @@ def status(
 
 @app.command()
 def logs(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    which: str = typer.Option(
-        "dbtReleaseBuilder",
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    which: Build = typer.Option(
+        Build.dbtReleaseBuilder,
         "--which",
-        help="dbtReleaseBuilder | dbtTestAndRun",
+        help="Which CodeBuild project's logs to read.",
     ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Tail until the build ends."),
     poll_seconds: int = typer.Option(5, "--poll-seconds", help="Follow poll interval."),
@@ -85,6 +101,7 @@ def logs(
     project name comes from SSM ``codebuild/*``. The follow loop is the same
     filter_log_events + de-dup pattern as `g3dt jobs logs`.
     """
+    which = which.value
     env = resolve.active_env(env)
     try:
         rc, session = _resolved(env)

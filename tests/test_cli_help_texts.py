@@ -92,3 +92,60 @@ def test_release_group_help_no_longer_promises_inspect():
     result = runner.invoke(app, ["release", "--help"])
     assert result.exit_code == 0
     assert "inspect" not in result.output.lower()
+
+
+def test_short_alias_convention_one_letter_one_meaning():
+    """
+    Input:    --help of the commands whose short aliases changed.
+    Expected: the CLI-wide convention holds — a letter means ONE thing:
+              -s = studies (never --sync), -l = --limit (freeing -n for
+              record counts), -f = --follow (config diff --file is
+              long-only), -v = the dictionary --version, -o = --on.
+
+    Background: 3.8.x had three collisions (-s study/sync, -n
+    num-records/limit, -f file/follow), so muscle memory from one command
+    silently meant something else on another.
+    """
+    checks = [
+        (["metadata", "upload-all", "--help"], "-s", "--studies"),
+        (["synth", "deploy", "--help"], "-s", "--studies"),
+        (["indexd", "check-download", "--help"], "-l", "--limit"),
+        (["dict", "pull", "--help"], "-v", "--version"),
+        (["metadata", "upload", "--help"], "-o", "--on"),
+    ]
+    for cmd, short, long in checks:
+        rendered = _rendered(runner.invoke(app, cmd))
+        assert short in rendered and long in rendered, f"{cmd}: {short} missing"
+
+    # the collision losers: k8s --sync and config diff --file go long-only
+    rendered = _rendered(runner.invoke(app, ["k8s", "restart-etl", "--help"]))
+    assert "--sync" in rendered and " -s " not in f" {rendered} "
+    rendered = _rendered(runner.invoke(app, ["config", "diff", "--help"]))
+    assert "--file" in rendered and " -f " not in f" {rendered} "
+
+
+def test_pipeline_which_rejects_unknown_stage_at_the_typer_layer():
+    """
+    Input:    g3dt pipeline status --which nope
+    Expected: usage error (exit 2) listing the valid choices — previously a
+              bad value survived to a runtime SSM lookup and a hand-written
+              error message.
+    """
+    result = runner.invoke(app, ["pipeline", "status", "--which", "nope"])
+    assert result.exit_code == 2
+    rendered = _rendered(result)
+    assert "writeReleaseInfo" in rendered and "dbtTestAndRun" in rendered
+
+
+def test_config_diff_missing_file_is_a_usage_error_not_a_traceback():
+    """
+    Input:    g3dt config diff --file /does/not/exist.json
+    Expected: Typer's path validation rejects it (exit 2) — previously the
+              command crashed later with a raw FileNotFoundError traceback
+              from file.read_text().
+    """
+    result = runner.invoke(
+        app, ["config", "diff", "--env", "test", "--file", "/does/not/exist.json"]
+    )
+    assert result.exit_code == 2
+    assert "does not exist" in _rendered(result)

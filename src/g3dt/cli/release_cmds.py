@@ -9,6 +9,9 @@ buildspec passes only `--env`, the version, and the commit SHA.
 """
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 import typer
 
 from g3dt import config
@@ -24,20 +27,23 @@ app = typer.Typer(
 
 @app.command()
 def write(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     data_release_version: str = typer.Option(
         ...,
         "--data-release-version",
         help="Data version, e.g. 1.4.0 (from the data-v* tag, prefix stripped).",
     ),
-    commit_id: str = typer.Option("", "--commit-id", help="Git SHA for auditing."),
-    dbt_schema_path: str = typer.Option(
-        "models/schema.yml",
+    commit_id: Optional[str] = typer.Option(
+        None, "--commit-id", help="Git SHA for auditing."
+    ),
+    dbt_schema_path: Path = typer.Option(
+        Path("models/schema.yml"),
         "--dbt-schema-path",
         help="dbt schema file listing the models to track (relative to the dbt project root).",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print the resolved DB/table/SQL and write nothing."
+        False, "--dry-run", "-d",
+        help="Print the resolved DB/table/SQL and write nothing."
     ),
 ) -> None:
     """Resolve release/db, release/table, athena/* from SSM, then write the rows.
@@ -72,12 +78,12 @@ def write(
             _req_key(rc, "glue/db/gold"),
         ]
         release_writer.run(
-            dbt_schema_path=dbt_schema_path,
+            dbt_schema_path=str(dbt_schema_path),
             release_db=rc.release_db,
             release_table=rc.release_table,
             release_s3_location=f"s3://{rc.metadata_bucket}/",
             data_release_version=data_release_version,
-            commit_id=commit_id,
+            commit_id=commit_id or "",
             aws_region=rc.region,
             athena_s3_output=rc.athena_output_location,
             aws_profile=profile,

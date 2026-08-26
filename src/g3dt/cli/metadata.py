@@ -5,6 +5,8 @@ env's EC2 job box via SSM Run Command (disconnect-safe) instead of the laptop.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import typer
 
 from g3dt.cli._internal import dispatch, resolve, safety
@@ -21,14 +23,14 @@ _UPLOAD_ALL = "services/upload/metadata/upload_all_studies.sh"
 @app.command()
 def upload(
     study: str = typer.Option(..., "--study", "-s", help="Study, e.g. ausdiab."),
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    node: str = typer.Option(None, "--node", help="Submit only this node type."),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    node: Optional[str] = typer.Option(None, "--node", help="Submit only this node type."),
     force_reupload: bool = typer.Option(
         False, "--force-reupload",
         help="Proceed even if this project+version was already uploaded to "
         "this commons (uploads are additive: re-running duplicates records).",
     ),
-    on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
+    on: Target = typer.Option(Target.local, "--on", "-o", help="Run local or on ec2."),
 ) -> None:
     """Upload a study's release metadata to Gen3 sheepdog.
 
@@ -67,9 +69,10 @@ def upload(
 @app.command(name="upload-all")
 def upload_all(
     studies: str = typer.Option(
-        ..., "--studies", help="Comma-separated studies, e.g. ausdiab,caughtcad."
+        ..., "--studies", "-s",
+        help="Comma-separated studies, e.g. ausdiab,caughtcad."
     ),
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     allow_prod: bool = typer.Option(
         False, "--allow-prod",
         help="Allow bulk upload against production (typed confirmation required).",
@@ -84,7 +87,7 @@ def upload_all(
         help="Proceed even for project+versions the audit table says were "
         "already uploaded to this commons.",
     ),
-    on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
+    on: Target = typer.Option(Target.local, "--on", "-o", help="Run local or on ec2."),
 ) -> None:
     """Upload several studies sequentially (wraps upload_all_studies.sh).
 

@@ -26,13 +26,13 @@ with ``--llm-api-key-file``); the vendor env var ``ANTHROPIC_API_KEY`` /
 from __future__ import annotations
 
 import json
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from g3dt import config
-from g3dt import contexts as _contexts
 from g3dt.config import (
     dictionary_filename,
     dictionary_url,
@@ -54,6 +54,21 @@ SYNTH_DIR = Path("~/.g3dt/synth_metadata").expanduser()
 #: Simulated study sets are batch inputs, not environment facts — there is
 #: no SSM fact for them, so --studies is required on the full-deploy flow.
 DEPLOY_DEFAULT_PREV_VERSION = "v1.0.0"
+
+
+class Provider(str, Enum):
+    """Value strategy for the simulator. A plain-str option let typos
+    (e.g. --provider llms) pass straight through to the generator."""
+
+    random = "random"
+    llm = "llm"
+
+
+class LLMProvider(str, Enum):
+    """LLM vendors the simulator supports."""
+
+    anthropic = "anthropic"
+    openai = "openai"
 
 
 def _check_per_study_counts(studies: str, num_records: Optional[str]) -> None:
@@ -85,6 +100,8 @@ def _llm_env_overrides(
     configured anywhere; the key-file path is optional — the simulator falls
     back to the vendor env var and raises its own error if neither exists.
     """
+    if isinstance(llm_provider, Enum):  # accept LLMProvider or a bare string
+        llm_provider = llm_provider.value
     effective_provider = llm_provider or e.llm_provider
     effective_model = llm_model or e.llm_model
     if not effective_model:
@@ -178,12 +195,12 @@ def _check_batch_matches_env(batch_dir: Path, e, ver: str, allow_mismatch: bool)
 
 @app.command()
 def deploy(
-    env: str = typer.Option(
+    env: Optional[str] = typer.Option(
         None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
-    llm_provider: Optional[str] = typer.Option(
+    llm_provider: Optional[LLMProvider] = typer.Option(
         None, "--llm-provider",
-        help="LLM vendor override (anthropic|openai); default: the env's SSM app/llm_provider.",
+        help="LLM vendor override; default: the env's SSM app/llm_provider.",
     ),
     llm_model: Optional[str] = typer.Option(
         None, "--llm-model",
@@ -204,7 +221,7 @@ def deploy(
         help="ETL cronjob name; default: the env's SSM app/etl_cronjob.",
     ),
     studies: str = typer.Option(
-        ..., "--studies",
+        ..., "--studies", "-s",
         help="Simulated study id(s), comma-separated (required). These are "
         "(re)generated, uploaded, and their previous batch deleted — the "
         "whole run is scoped to exactly this list. "
@@ -267,13 +284,6 @@ def deploy(
       g3dt synth deploy -e test --studies synthetic_dataset_1 -n 100 --skip-dict
       g3dt synth deploy -e test --studies "s1,s2" -n "100,50" --prev-version v1.2.0
     """
-    if env is None:
-        try:
-            has_ctx = _contexts.resolve_context(required=False)[0] is not None
-        except Exception:
-            has_ctx = True  # let active_env surface the error cleanly below
-        if not has_ctx:
-            env = "test"   # historical default when nothing is configured
     env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic full deploy", env)
@@ -316,17 +326,18 @@ def generate(
         ...,
         help="Simulated study id(s); comma-separated for many, e.g. AusDiab_Simulated.",
     ),
-    env: str = typer.Option(
+    env: Optional[str] = typer.Option(
         None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
-    num_records: str = typer.Option(
+    num_records: Optional[str] = typer.Option(
         None,
         "--num-records",
         "-n",
         help="Records per study: one number for all, or a comma list (one per study).",
     ),
-    provider: str = typer.Option(
-        "random", "--provider", help="Value strategy: 'random' (default, keyless) or 'llm'."
+    provider: Provider = typer.Option(
+        Provider.random, "--provider",
+        help="Value strategy: 'random' (default, keyless) or 'llm'.",
     ),
     llm: bool = typer.Option(
         False,
@@ -335,9 +346,9 @@ def generate(
         "env's SSM tree (override with --llm-provider/--llm-model). Default is "
         "keyless random data (no API key, no API calls).",
     ),
-    llm_provider: Optional[str] = typer.Option(
+    llm_provider: Optional[LLMProvider] = typer.Option(
         None, "--llm-provider",
-        help="LLM vendor override (anthropic|openai); default: the env's SSM app/llm_provider.",
+        help="LLM vendor override; default: the env's SSM app/llm_provider.",
     ),
     llm_model: Optional[str] = typer.Option(
         None, "--llm-model",
@@ -348,12 +359,16 @@ def generate(
         help="Path to the file holding the LLM API key; default: the marker's "
         "llm_api_key_file (set once: g3dt synth set-key <path>).",
     ),
-    seed: int = typer.Option(None, "--seed", help="RNG seed for reproducible output."),
-    schema: str = typer.Option(
-        None, "--schema", help="Gen3 schema path (default: pulled for the version)."
+    seed: Optional[int] = typer.Option(
+        None, "--seed", help="RNG seed for reproducible output."
     ),
-    version: str = typer.Option(
-        None, "--version", help="Version label for output dir (default: env dictionary_version)."
+    schema: Optional[Path] = typer.Option(
+        None, "--schema", exists=True, dir_okay=False,
+        help="Gen3 schema file (default: pulled for the version).",
+    ),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v",
+        help="Version label for output dir (default: env dictionary_version).",
     ),
 ) -> None:
     """Generate synthetic metadata locally with gen3-metadata-simulator.
@@ -369,20 +384,13 @@ def generate(
       g3dt synth generate dataset_a --llm --llm-model gpt-4o-mini \
           --llm-api-key-file ~/keys/openai_api_key.txt
     """
-    if env is None:
-        try:
-            has_ctx = _contexts.resolve_context(required=False)[0] is not None
-        except Exception:
-            has_ctx = True  # let active_env surface the error cleanly below
-        if not has_ctx:
-            env = "test"   # historical default when nothing is configured
     env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic generation", env)
     _check_per_study_counts(studies, num_records)
 
     ver = version or e.dictionary_version
-    schema_path = schema or str(SCHEMA_DIR / dictionary_filename(e, ver))
+    schema_path = str(schema) if schema else str(SCHEMA_DIR / dictionary_filename(e, ver))
 
     # A batch is only valid against the dictionary that generated it, and the
     # output directory is named for `ver` -- so an explicit --schema carrying a
@@ -412,11 +420,11 @@ def generate(
             env=script_env(e, ver),
         )
 
-    effective_provider = "llm" if llm else provider
+    effective_provider = Provider.llm if llm else provider
     args = [
         "--schema", schema_path,
         "--version", ver,
-        "--provider", effective_provider,
+        "--provider", effective_provider.value,
         "--studies", studies,
     ]
     if num_records:
@@ -424,7 +432,7 @@ def generate(
     if seed is not None:
         args += ["--seed", str(seed)]
     env_vars = script_env(e, ver)
-    if effective_provider == "llm":
+    if effective_provider is Provider.llm:
         env_vars.update(
             _llm_env_overrides(e, llm_provider, llm_model, llm_api_key_file)
         )
@@ -441,11 +449,12 @@ def generate(
 
 @app.command()
 def upload(
-    env: str = typer.Option(
+    env: Optional[str] = typer.Option(
         None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
-    version: str = typer.Option(
-        None, "--version", help="Dictionary version dir (default: the env's version)."
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v",
+        help="Dictionary version dir (default: the env's version).",
     ),
     allow_version_mismatch: bool = typer.Option(
         False,
@@ -453,7 +462,7 @@ def upload(
         help="Upload even if the batch was generated against another dictionary.",
     ),
     studies: Optional[str] = typer.Option(
-        None, "--studies",
+        None, "--studies", "-s",
         help="Comma-separated study directory names to upload. Default: every "
         "study directory in the batch. Directories not listed are skipped "
         "with a log line — pass this to keep stale batches out of the upload.",
@@ -470,13 +479,6 @@ def upload(
     anything else sitting in the batch directory (e.g. a leftover from an
     earlier run) is skipped and logged, never submitted.
     """
-    if env is None:
-        try:
-            has_ctx = _contexts.resolve_context(required=False)[0] is not None
-        except Exception:
-            has_ctx = True  # let active_env surface the error cleanly below
-        if not has_ctx:
-            env = "test"   # historical default when nothing is configured
     env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic metadata upload", env)
@@ -501,30 +503,26 @@ def upload(
 
 @app.command()
 def delete(
-    env: str = typer.Option(
+    env: Optional[str] = typer.Option(
         None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
-    projects: str = typer.Option(
+    projects: Optional[str] = typer.Option(
         None, "--projects", "-p", help="Comma-separated simulated project ids."
     ),
-    import_order: str = typer.Option(
+    import_order: Optional[Path] = typer.Option(
         None,
         "--import-order",
+        "-i",
+        exists=True,
+        dir_okay=False,
         help="DataImportOrder.txt path (default: DataImportOrder.txt in the cwd).",
     ),
 ) -> None:
     """Delete previously-uploaded synthetic metadata from Gen3."""
-    if env is None:
-        try:
-            has_ctx = _contexts.resolve_context(required=False)[0] is not None
-        except Exception:
-            has_ctx = True  # let active_env surface the error cleanly below
-        if not has_ctx:
-            env = "test"   # historical default when nothing is configured
     env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic metadata deletion", env)
-    order = import_order or "DataImportOrder.txt"
+    order = str(import_order) if import_order else "DataImportOrder.txt"
     args = ["-i", order, "-s", e.aws_secret_name]
     if e.aws_profile:
         args += ["-profile", e.aws_profile]
@@ -552,7 +550,7 @@ def install_simulator() -> None:
 
 @app.command(name="set-key")
 def set_key(
-    path: str = typer.Argument(
+    path: Path = typer.Argument(
         ..., help="Path to the file holding your LLM API key."
     ),
 ) -> None:

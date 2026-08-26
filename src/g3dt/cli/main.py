@@ -5,6 +5,8 @@ The console-script entry point in pyproject.toml points at :func:`main`.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import typer
 
 from g3dt.cli import (
@@ -32,9 +34,10 @@ app = typer.Typer(
 
 @app.callback()
 def _root(
-    ctx_name: str = typer.Option(
+    ctx_name: Optional[str] = typer.Option(
         None,
         "--ctx",
+        "-c",
         help="One-shot context override, e.g. myproj/staging "
              "(see 'g3dt config contexts').",
     ),

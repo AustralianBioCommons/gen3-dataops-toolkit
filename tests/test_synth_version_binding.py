@@ -84,7 +84,7 @@ def test_generate_records_the_dictionary_it_used(mock_run, _env, dirs):
     """
     _, synth = dirs
     result = runner.invoke(
-        app, ["synth", "generate", "AusDiab_Simulated", "-n", "5"]
+        app, ["synth", "generate", "AusDiab_Simulated", "-n", "5", "--env", "test"]
     )
     assert result.exit_code == 0, result.output
 
@@ -112,7 +112,7 @@ def test_generate_rejects_schema_that_contradicts_version(mock_run, _env, dirs):
 
     result = runner.invoke(
         app,
-        ["synth", "generate", "AusDiab_Simulated", "-n", "5",
+        ["synth", "generate", "AusDiab_Simulated", "-n", "5", "--env", "test",
          "--schema", str(stale), "--version", "v1.1.0"],
     )
     assert result.exit_code == 1
@@ -137,7 +137,7 @@ def test_generate_allows_an_unversioned_schema(mock_run, _env, dirs):
 
     result = runner.invoke(
         app,
-        ["synth", "generate", "AusDiab_Simulated", "-n", "5", "--schema", str(draft)],
+        ["synth", "generate", "AusDiab_Simulated", "-n", "5", "--env", "test", "--schema", str(draft)],
     )
     assert result.exit_code == 0, result.output
 

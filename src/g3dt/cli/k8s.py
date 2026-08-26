@@ -51,8 +51,8 @@ def restart_env(e, restart_services: Optional[str] = None,
 
 @app.command(name="restart-schema")
 def restart_schema(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    sync: bool = typer.Option(False, "--sync", "-s", help="argocd app sync first."),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    sync: bool = typer.Option(False, "--sync", help="argocd app sync first."),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),
@@ -71,8 +71,8 @@ def restart_schema(
 
 @app.command(name="restart-etl")
 def restart_etl(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    sync: bool = typer.Option(False, "--sync", "-s", help="argocd app sync first."),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    sync: bool = typer.Option(False, "--sync", help="argocd app sync first."),
     etl_cronjob: Optional[str] = typer.Option(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
@@ -91,7 +91,7 @@ def restart_etl(
 
 @app.command(name="restart-ms")
 def restart_ms(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),

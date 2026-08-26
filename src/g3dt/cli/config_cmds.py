@@ -204,11 +204,13 @@ def use(
 def add(
     name: str = typer.Argument(..., help="Context name, e.g. myproj/staging."),
     project: str = typer.Option(..., "--project", help="Project id, e.g. myproj."),
-    env: str = typer.Option(..., "--env", help="Base environment, e.g. staging."),
-    profile: str = typer.Option(
+    env: str = typer.Option(..., "--env", "-e", help="Base environment, e.g. staging."),
+    profile: Optional[str] = typer.Option(
         None, "--profile", help="AWS named profile (omit for the ambient chain)."
     ),
-    region: str = typer.Option(None, "--region", help="AWS region override."),
+    region: Optional[str] = typer.Option(
+        None, "--region", "-r", help="AWS region override."
+    ),
     production: bool = typer.Option(
         False, "--production",
         help="Mark as production: strict typed confirmation on every "
@@ -265,7 +267,7 @@ def forget(
 
 @app.command("discover")
 def discover(
-    profile_arg: str = typer.Argument(
+    profile_arg: Optional[str] = typer.Argument(
         None, metavar="[PROFILE]",
         help="Scan just this AWS profile's account. If its SSO session is "
              "stale you are offered `aws sso login` first.",
@@ -283,8 +285,8 @@ def discover(
         [], "--profile", hidden=True,
         help="(Deprecated) Restrict --all-profiles to these profiles.",
     ),
-    region: str = typer.Option(
-        None, "--region", help="Region for profiles that configure none."
+    region: Optional[str] = typer.Option(
+        None, "--region", "-r", help="Region for profiles that configure none."
     ),
 ) -> None:
     """Scan an AWS profile's account for deployed environments (register with --add).
@@ -526,7 +528,7 @@ def envs() -> None:
 
 @app.command()
 def studies(
-    env: str = typer.Option(
+    env: Optional[str] = typer.Option(
         None,
         "--env",
         "-e",
@@ -560,8 +562,8 @@ def studies(
 
 @app.command()
 def show(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    study: str = typer.Option(
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    study: Optional[str] = typer.Option(
         None, "--study", "-s", help="Optional study to resolve against the env."
     ),
     full: bool = typer.Option(
@@ -619,11 +621,12 @@ def show(
 
 @app.command()
 def diff(
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     file: Path = typer.Option(
         ...,
         "--file",
-        "-f",
+        exists=True,
+        dir_okay=False,
         help="The env's INPUT file in the deployment wrapper, e.g. "
         "../myproj-pipeline-deploy/config/myproj.staging.json.",
     ),
@@ -701,7 +704,7 @@ def diff(
 
 @app.command("dbt-env")
 def dbt_env(
-    env: str = typer.Option(
+    env: Optional[str] = typer.Option(
         None, "--env", "-e",
         help=ENV_OPT + " CodeBuild always passes this explicitly.",
     ),

@@ -1,9 +1,11 @@
 """`g3dt delete` — destructive metadata removal (data-plane).
 
 A single ``delete metadata`` command handles one or many studies, sequentially,
-in a single job. ``--version`` is required: pass a specific version (e.g.
-``0.9.8``) to remove just that version (resolved via an Athena GUID lookup), or
-``all`` to remove every version.
+in a single job. Every study needs a version: either write it inline as
+``name:version`` in ``--studies``, or pass ``--version`` as the fallback for
+the bare names (a specific version like ``0.9.8``, resolved via an Athena GUID
+lookup, or ``all`` for every version). A bare study with no version anywhere
+is refused (exit 2).
 
 Every command confirms before acting. Production always requires typing the
 target id, even with ``--yes``. Deleting ALL versions always prompts, even with
@@ -13,6 +15,8 @@ TTY), after which the remote job runs non-interactively.
 from __future__ import annotations
 
 import re
+
+from typing import Optional
 
 import typer
 
@@ -124,21 +128,23 @@ def metadata(
     studies: str = typer.Option(
         ...,
         "--studies",
+        "-s",
         help="Comma-separated studies, each optionally 'name:version', "
              "e.g. ausdiab:0.7.5,cdah:0.8.1,edcad.",
     ),
-    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    version: str = typer.Option(
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    version: Optional[str] = typer.Option(
         None,
         "--version",
+        "-v",
         help="Default version for studies written without their own "
              "':version', e.g. 0.9.8, or 'all' for every version.",
     ),
-    node: str = typer.Option(None, "--node", help="Delete only this node type."),
+    node: Optional[str] = typer.Option(None, "--node", help="Delete only this node type."),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the non-prod prompt (specific-version only)."
     ),
-    on: Target = typer.Option(Target.local, "--on", help="Run local or on ec2."),
+    on: Target = typer.Option(Target.local, "--on", "-o", help="Run local or on ec2."),
 ) -> None:
     """Delete study metadata for one or more studies, sequentially, in one job.
 
