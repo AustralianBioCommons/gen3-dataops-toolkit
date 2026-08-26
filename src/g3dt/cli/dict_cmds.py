@@ -15,7 +15,7 @@ from typing import Optional
 import typer
 
 from g3dt.config import dictionary_filename, dictionary_url, script_env
-from g3dt.cli._internal import resolve, runner
+from g3dt.cli._internal import resolve, runner, safety
 from g3dt.cli._internal.resolve import env_of
 from g3dt.cli._internal.helptext import ENV_OPT
 
@@ -86,9 +86,13 @@ def upload(
         help="Dictionary git tag (default: the env's version).",
     ),
 ) -> None:
-    """Upload the (already pulled) dictionary JSON to the env's S3 location."""
+    """Upload the (already pulled) dictionary JSON to the env's S3 location.
+
+    Targeting production requires typing the context/env name to confirm.
+    """
     env = resolve.active_env(env)
     e = env_of(env)
+    safety.confirm_prod_strict("dictionary upload", env)
     warn_if_overridden(e, version)
     v = _version(e, version)
     local_file = str(SCHEMA_DIR / dictionary_filename(e, v))
@@ -131,9 +135,13 @@ def deploy(
       g3dt dict deploy --env test
       g3dt dict deploy --env test --version v1.1.7
       g3dt dict deploy --env staging --version v1.1.7   # promote the same tag
+
+    Targeting production requires typing the context/env name to confirm —
+    this uploads a new schema to the live commons and restarts its services.
     """
     env = resolve.active_env(env)
     e = env_of(env)
+    safety.confirm_prod_strict("dictionary deploy", env)
     warn_if_overridden(e, version)
     env_vars = script_env(e, _version(e, version))
     if restart_services:

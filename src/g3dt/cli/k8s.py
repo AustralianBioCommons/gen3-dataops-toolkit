@@ -18,7 +18,7 @@ from typing import Optional
 import typer
 
 from g3dt.config import script_env
-from g3dt.cli._internal import resolve, runner
+from g3dt.cli._internal import resolve, runner, safety
 from g3dt.cli._internal.resolve import env_of
 from g3dt.cli._internal.helptext import ENV_OPT
 
@@ -57,9 +57,13 @@ def restart_schema(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),
 ) -> None:
-    """Restart the schema microservices, in the env's configured order."""
+    """Restart the schema microservices, in the env's configured order.
+
+    Targeting production requires typing the context/env name to confirm.
+    """
     env = resolve.active_env(env)
     e = env_of(env)
+    safety.confirm_prod_strict("kubernetes schema restart", env)
     args = ["-d", e.domain, "-a", e.app_name, "-n", e.namespace]
     if sync:
         args.append("-s")
@@ -77,9 +81,13 @@ def restart_etl(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
 ) -> None:
-    """Create + run the ETL cronjob and wait for completion."""
+    """Create + run the ETL cronjob and wait for completion.
+
+    Targeting production requires typing the context/env name to confirm.
+    """
     env = resolve.active_env(env)
     e = env_of(env)
+    safety.confirm_prod_strict("kubernetes ETL restart", env)
     args = ["-e", env]
     if sync:
         args.append("-s")
@@ -99,9 +107,14 @@ def restart_ms(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
 ) -> None:
-    """Restart both ETL and schema microservices (wraps restart_etl_and_ms.sh)."""
+    """Restart both ETL and schema microservices (wraps restart_etl_and_ms.sh).
+
+    Targeting production requires typing the context/env name to confirm —
+    this restarts every Gen3 microservice in the target commons.
+    """
     env = resolve.active_env(env)
     e = env_of(env)
+    safety.confirm_prod_strict("kubernetes full restart", env)
     runner.run(
         runner.bash_script(_ETL_AND_MS, env),
         env=restart_env(e, restart_services=restart_services, etl_cronjob=etl_cronjob),
