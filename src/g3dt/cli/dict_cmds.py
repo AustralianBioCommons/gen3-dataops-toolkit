@@ -17,6 +17,7 @@ import typer
 from g3dt.config import dictionary_filename, dictionary_url, script_env
 from g3dt.cli._internal import resolve, runner
 from g3dt.cli._internal.resolve import env_of
+from g3dt.cli._internal.helptext import ENV_OPT
 
 app = typer.Typer(no_args_is_help=True, help="Data dictionary operations (local).")
 
@@ -48,7 +49,7 @@ def warn_if_overridden(env_cfg, version: Optional[str]) -> None:
 
 @app.command()
 def pull(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),
@@ -78,7 +79,7 @@ def pull(
 
 @app.command()
 def upload(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),
@@ -101,7 +102,7 @@ def upload(
 
 @app.command()
 def deploy(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     version: str = typer.Option(
         None, "--version", help="Dictionary git tag (default: the env's version)."
     ),

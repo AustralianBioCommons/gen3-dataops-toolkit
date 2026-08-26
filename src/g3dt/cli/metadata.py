@@ -10,6 +10,7 @@ import typer
 from g3dt.cli._internal import dispatch, resolve, safety
 from g3dt.cli._internal.dispatch import Target
 from g3dt.cli._internal.resolve import study_of
+from g3dt.cli._internal.helptext import ENV_OPT
 
 app = typer.Typer(no_args_is_help=True, help="Upload study metadata to Gen3.")
 
@@ -20,7 +21,7 @@ _UPLOAD_ALL = "services/upload/metadata/upload_all_studies.sh"
 @app.command()
 def upload(
     study: str = typer.Option(..., "--study", "-s", help="Study, e.g. ausdiab."),
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     node: str = typer.Option(None, "--node", help="Submit only this node type."),
     force_reupload: bool = typer.Option(
         False, "--force-reupload",
@@ -68,7 +69,7 @@ def upload_all(
     studies: str = typer.Option(
         ..., "--studies", help="Comma-separated studies, e.g. ausdiab,caughtcad."
     ),
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     allow_prod: bool = typer.Option(
         False, "--allow-prod",
         help="Allow bulk upload against production (typed confirmation required).",

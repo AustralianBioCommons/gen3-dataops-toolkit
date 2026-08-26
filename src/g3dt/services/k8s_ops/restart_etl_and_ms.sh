@@ -5,13 +5,13 @@ set -e
 # Ensure pipeline failures are captured
 set -o pipefail
 
-# Usage: bash restart_etl_and_ms.sh <profile>
-# <profile> is display-only; all configuration comes from G3DT_* environment
+# Usage: bash restart_etl_and_ms.sh <environment>
+# <environment> is display-only; all configuration comes from G3DT_* environment
 # variables exported by the g3dt CLI (g3dt.config.script_env).
-PROFILE="${1:-}"
+ENVIRONMENT="${1:-}"
 
-if [ -z "$PROFILE" ]; then
-    echo "Usage: $0 <profile> (test|staging|prod) — run via the g3dt CLI"
+if [ -z "$ENVIRONMENT" ]; then
+    echo "Usage: $0 <environment> (test|staging|prod) — run via the g3dt CLI"
     exit 1
 fi
 
@@ -30,9 +30,9 @@ ARGO_SCRIPT_DIR="${SCRIPT_DIR}"
 # Never export an empty AWS_PROFILE (empty means ambient credentials).
 if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
     export AWS_PROFILE="${G3DT_AWS_PROFILE}"
-    echo "==== Configuring AWS PROFILE as '${AWS_PROFILE}' for profile '${PROFILE}' ===="
+    echo "==== Using AWS profile '${AWS_PROFILE}' for environment '${ENVIRONMENT}' ===="
 else
-    echo "==== No AWS profile set for '${PROFILE}' — using ambient AWS credentials ===="
+    echo "==== No AWS profile set for environment '${ENVIRONMENT}' — using ambient AWS credentials ===="
 fi
 
 echo "Updating kubeconfig for cluster: ${CLUSTER_NAME}"

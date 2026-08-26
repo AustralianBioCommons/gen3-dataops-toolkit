@@ -150,8 +150,9 @@ g3dt dict deploy --env staging --version v1.1.7   # same tag, no cdk deploy
 ```
 
 An override does not persist, so `config show` keeps reporting the declared
-version until the CDK config catches up — `g3dt config diff --env <env>` reports
-exactly that gap and exits 1, so it can gate CI.
+version until the CDK config catches up —
+`g3dt config diff --env <env> --file <wrapper>/config/<project>.<env>.json`
+reports exactly that gap and exits 1, so it can gate CI.
 
 Synthetic data is only schema-valid against the dictionary that generated it, so
 `synth generate` records the dictionary version in each batch and `synth upload`
@@ -174,7 +175,7 @@ Only the API key stays local — as a *path* to the file holding it, never the
 key itself, set once per operator:
 
 ```bash
-g3dt config set llm_api_key_file ~/.g3dt/anthropic_api_key
+g3dt synth set-key ~/.g3dt/anthropic_api_key
 g3dt synth generate AusDiab_Simulated --llm -n 5 -e test
 ```
 

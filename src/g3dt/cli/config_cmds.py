@@ -26,6 +26,7 @@ import typer
 from g3dt import config, contexts
 from g3dt.cli._internal import resolve
 from g3dt.cli._internal.resolve import env_of, study_of
+from g3dt.cli._internal.helptext import ENV_OPT
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -214,7 +215,7 @@ def add(
              "destructive action.",
     ),
 ) -> None:
-    """Register one context by hand (`config discover --add` is the usual path)."""
+    """Register one context by hand ('config discover <profile> --add' is the usual path)."""
     resolve.announce_context()
     marker = config.load_marker()
     ctx = contexts.Context(
@@ -529,7 +530,10 @@ def studies(
         None,
         "--env",
         "-e",
-        help="Also check the env's S3 registry (s3://<metadata-bucket>/config/studies.yaml).",
+        help="Read the study registry from this env's S3 bucket "
+             "(s3://<metadata-bucket>/config/studies.yaml) instead of the "
+             "local marker — this changes the data source, not just the "
+             "target.",
     ),
 ) -> None:
     """List the configured studies (bare names).
@@ -556,10 +560,7 @@ def studies(
 
 @app.command()
 def show(
-    env: str = typer.Option(
-        None, "--env", "-e",
-        help="Environment; defaults to the current context.",
-    ),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     study: str = typer.Option(
         None, "--study", "-s", help="Optional study to resolve against the env."
     ),
@@ -618,10 +619,7 @@ def show(
 
 @app.command()
 def diff(
-    env: str = typer.Option(
-        None, "--env", "-e",
-        help="Environment; defaults to the current context.",
-    ),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     file: Path = typer.Option(
         ...,
         "--file",
@@ -705,8 +703,7 @@ def diff(
 def dbt_env(
     env: str = typer.Option(
         None, "--env", "-e",
-        help="Environment; defaults to the current context. CodeBuild always "
-             "passes this explicitly.",
+        help=ENV_OPT + " CodeBuild always passes this explicitly.",
     ),
 ) -> None:
     """Emit `export` lines for the env's dbt settings (resolved from SSM).

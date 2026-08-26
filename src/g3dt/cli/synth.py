@@ -11,16 +11,15 @@ confirm — it cannot be bypassed.
 
 Studies and record counts are **batch inputs**, passed per command
 (``generate STUDIES -n N``, ``deploy --studies ... -n ...``) — they are not
-environment facts, so they never come from SSM. The ``deploy`` defaults are
-the original ACDC demo set, kept for continuity; other projects pass their
-own.
+environment facts, so they never come from SSM, and ``deploy`` requires an
+explicit ``--studies`` list (it scopes deletion, generation and upload).
 
 Generation defaults to keyless ``random`` data (no API calls). Pass ``--llm``
 for LLM-realistic values. The LLM provider and model come from the
 environment's SSM tree (the CDK config's optional ``llm`` block, published as
 ``app/llm_provider`` / ``app/llm_model``) and can be overridden per run with
 ``--llm-provider`` / ``--llm-model``. Only the API key stays local: point at
-its file once with ``g3dt config set llm_api_key_file <path>`` (or per run
+its file once with ``g3dt synth set-key <path>`` (or per run
 with ``--llm-api-key-file``); the vendor env var ``ANTHROPIC_API_KEY`` /
 ``OPENAI_API_KEY`` also works. The old ``~/.g3dt/.env`` is no longer read.
 """
@@ -42,6 +41,7 @@ from g3dt.config import (
 )
 from g3dt.cli._internal import resolve, runner, safety
 from g3dt.cli._internal.resolve import env_of
+from g3dt.cli._internal.helptext import ENV_OPT_SYNTH
 from g3dt.cli.dict_cmds import SCHEMA_DIR, warn_if_overridden
 
 app = typer.Typer(
@@ -179,7 +179,7 @@ def _check_batch_matches_env(batch_dir: Path, e, ver: str, allow_mismatch: bool)
 @app.command()
 def deploy(
     env: str = typer.Option(
-        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
     llm_provider: Optional[str] = typer.Option(
         None, "--llm-provider",
@@ -192,7 +192,7 @@ def deploy(
     llm_api_key_file: Optional[Path] = typer.Option(
         None, "--llm-api-key-file", exists=True, dir_okay=False,
         help="Path to the file holding the LLM API key; default: the marker's "
-        "llm_api_key_file (set once: g3dt config set llm_api_key_file <path>).",
+        "llm_api_key_file (set once: g3dt synth set-key <path>).",
     ),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services",
@@ -222,39 +222,40 @@ def deploy(
     ),
     skip_dict: bool = typer.Option(
         False, "--skip-dict",
-        help="Skip the dictionary upload and schema restarts (steps 1-2) — "
+        help="Skip the dictionary upload and schema restarts (steps [1-3]) — "
         "synthetic data only: delete previous batch, generate, upload, run "
         "ETL. Use when the deployed dictionary is already current.",
     ),
     skip_delete: bool = typer.Option(
         False, "--skip-delete",
-        help="Skip step 3 (deleting the previous synthetic batch) without "
+        help="Skip step [4] (deleting the previous synthetic batch) without "
         "prompting. Without this flag, deletion asks for confirmation; "
         "declining skips it and the flow continues.",
     ),
 ) -> None:
     """Full end-to-end synthetic deploy: the whole cycle in one command.
 
-    Wraps services/synthetic_data/full_deploy_dd_and_synth.sh, which runs:
+    Wraps services/synthetic_data/full_deploy_dd_and_synth.sh, whose steps
+    (numbered as the script echoes them) are:
 
     \b
-      1. pull the dictionary at the env's version and upload it to S3
-      2. restart the schema microservices (env's SSM restart_services order)
-      3. delete the PREVIOUS synthetic batch for the given studies
-         (--prev-version, so stale records don't linger in the commons)
-      4. LLM-generate a new batch for the studies (provider/model from SSM)
-      5. upload the new batch to Gen3
-      6. run the ETL cronjob (env's SSM etl_cronjob)
+      [1-2] pull the dictionary at the env's version and upload it to S3
+      [3]   restart the schema microservices (SSM restart_services order)
+      [4]   delete the PREVIOUS synthetic batch for the given studies
+            (--prev-version, so stale records don't linger in the commons)
+      [5]   LLM-generate a new batch for the studies (provider/model from SSM)
+      [6]   upload the new batch to Gen3 (scoped to --studies)
+      [7]   run the ETL cronjob (env's SSM etl_cronjob)
 
-    With --skip-dict, steps 1-2 are skipped (the schema is still fetched
+    With --skip-dict, steps [1-3] are skipped (the schema is still fetched
     locally if missing — generation validates against it) and the flow is
     synthetic-data only. Equivalent by hand: synth delete + synth generate +
     synth upload + k8s restart-etl.
 
-    Step 3 is destructive, so it asks for confirmation (skip it outright with
-    --skip-delete, or decline the prompt — the flow continues either way).
-    On a first deploy, when no previous batch exists locally, deletion is
-    skipped automatically.
+    Step [4] is destructive, so it asks for confirmation (skip it outright
+    with --skip-delete, or decline the prompt — the flow continues either
+    way). On a first deploy, when no previous batch exists locally, deletion
+    is skipped automatically.
 
     Provider/model, restart targets, and the ETL cronjob come from the env's
     SSM tree unless overridden; the API key path comes from
@@ -316,7 +317,7 @@ def generate(
         help="Simulated study id(s); comma-separated for many, e.g. AusDiab_Simulated.",
     ),
     env: str = typer.Option(
-        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
     num_records: str = typer.Option(
         None,
@@ -345,7 +346,7 @@ def generate(
     llm_api_key_file: Optional[Path] = typer.Option(
         None, "--llm-api-key-file", exists=True, dir_okay=False,
         help="Path to the file holding the LLM API key; default: the marker's "
-        "llm_api_key_file (set once: g3dt config set llm_api_key_file <path>).",
+        "llm_api_key_file (set once: g3dt synth set-key <path>).",
     ),
     seed: int = typer.Option(None, "--seed", help="RNG seed for reproducible output."),
     schema: str = typer.Option(
@@ -441,7 +442,7 @@ def generate(
 @app.command()
 def upload(
     env: str = typer.Option(
-        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
     version: str = typer.Option(
         None, "--version", help="Dictionary version dir (default: the env's version)."
@@ -501,7 +502,7 @@ def upload(
 @app.command()
 def delete(
     env: str = typer.Option(
-        None, "--env", "-e", help="Target environment (prod requires typed confirmation)."
+        None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
     projects: str = typer.Option(
         None, "--projects", "-p", help="Comma-separated simulated project ids."
@@ -559,7 +560,7 @@ def set_key(
 
     Writes ``llm_api_key_file`` into the local g3dt.yaml marker — the key
     itself never leaves the file you name. This replaces the deprecated
-    ``g3dt config set llm_api_key_file <path>``.
+    ``g3dt config set llm_api_key_file`` spelling.
     """
     resolve.announce_context()
     resolved = Path(path).expanduser()

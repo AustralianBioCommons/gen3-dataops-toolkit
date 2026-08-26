@@ -36,7 +36,7 @@ def _root(
         None,
         "--ctx",
         help="One-shot context override, e.g. myproj/staging "
-             "(see `g3dt config contexts`).",
+             "(see 'g3dt config contexts').",
     ),
 ) -> None:
     """Record the global --ctx override before any sub-command runs."""
@@ -91,7 +91,8 @@ Mental model: two execution planes
 Discover everything
   g3dt --help                      list all command groups
   g3dt <group> --help              commands + options for a group
-  g3dt config contexts             your contexts (current marked *)
+  g3dt config contexts             your contexts (current marked *; add
+                                   --verify to check what is deployed)
   g3dt config envs                 environments with a deployed SSM tree
   g3dt config studies              studies from your g3dt.yaml marker
   g3dt config show                 resolved settings for the current context
@@ -109,8 +110,8 @@ Promoting one dictionary across environments
     g3dt dict deploy --env test    --version v1.1.7
     g3dt dict deploy --env staging --version v1.1.7
   The override does not persist: `g3dt config show` keeps reporting the declared
-  version, and `g3dt config diff --env <env>` reports the gap (exit 1) until
-  config/<project>.<env>.json is updated to match.
+  version, and `g3dt config diff --env <env> --file <wrapper>/config/<project>.<env>.json`
+  reports the gap (exit 1) until that INPUT file is updated to match.
 
 Data releases (the dbt pipeline; see the project's dbt repo)
   git tag data-v1.4.0 && git push origin data-v1.4.0
@@ -119,7 +120,7 @@ Data releases (the dbt pipeline; see the project's dbt repo)
   (the pipeline itself runs `g3dt release write` — no names needed anywhere)
 
 Synthetic data (test only, all local)
-  g3dt synth deploy --env test
+  g3dt synth deploy --env test --studies synthetic_dataset_1 -n 100
   Batches are only schema-valid against the dictionary that generated them, so
   each one records its dictionary version and `g3dt synth upload` refuses a
   batch that does not match the version being uploaded.

@@ -14,6 +14,7 @@ import typer
 from g3dt import config
 from g3dt.cli._internal import resolve
 from g3dt.cli._internal.resolve import env_of
+from g3dt.cli._internal.helptext import ENV_OPT
 from g3dt.upload.metadata_submitter import create_boto3_session
 
 app = typer.Typer(no_args_is_help=True, help="Manage the env's EC2 job box.")
@@ -40,7 +41,7 @@ def _session(e):
 
 @app.command()
 def up(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     wait: bool = typer.Option(
         True, "--wait/--no-wait", help="Wait until the box registers with SSM."
     ),
@@ -83,7 +84,7 @@ def up(
 
 @app.command()
 def down(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
 ) -> None:
     """Stop the env's job box.
 
@@ -98,7 +99,7 @@ def down(
 
 @app.command()
 def status(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
 ) -> None:
     """Show the box's EC2 state and SSM reachability."""
     env = resolve.active_env(env)

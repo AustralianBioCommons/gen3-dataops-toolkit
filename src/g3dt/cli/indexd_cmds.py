@@ -13,6 +13,7 @@ import typer
 from g3dt.cli._internal import dispatch, resolve, runner
 from g3dt.cli._internal.dispatch import Target
 from g3dt.cli._internal.resolve import env_of, study_of
+from g3dt.cli._internal.helptext import ENV_OPT
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -29,7 +30,7 @@ def register(
         ..., "--s3-paths", help="One or more S3 prefixes to scan (repeatable)."
     ),
     study: str = typer.Option(..., "--study", "-s", help="Study, e.g. edcad."),
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Scan + write file_metadata only; skip indexd."
     ),
@@ -83,7 +84,7 @@ def check_download(
         help="Object GUIDs, e.g. PREFIX/<uuid>. Omit to sample the most "
              "recently registered objects from the indexd registry.",
     ),
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     limit: int = typer.Option(
         25, "--limit", "-n",
         help="How many objects to sample when no GUIDs are given.",

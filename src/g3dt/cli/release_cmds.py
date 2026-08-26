@@ -13,14 +13,18 @@ import typer
 
 from g3dt import config
 from g3dt.cli._internal import resolve
+from g3dt.cli._internal.helptext import ENV_OPT
 from g3dt.utils import release_writer
 
-app = typer.Typer(no_args_is_help=True, help="Write/inspect dbt data releases.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Write dbt data-release rows to the env's releases table.",
+)
 
 
 @app.command()
 def write(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     data_release_version: str = typer.Option(
         ...,
         "--data-release-version",

@@ -19,6 +19,7 @@ import typer
 from g3dt.cli._internal import dispatch, resolve, safety
 from g3dt.cli._internal.dispatch import Target
 from g3dt.cli._internal.resolve import study_of
+from g3dt.cli._internal.helptext import ENV_OPT
 
 app = typer.Typer(no_args_is_help=True, help="Delete metadata from Gen3 (destructive).")
 
@@ -126,7 +127,7 @@ def metadata(
         help="Comma-separated studies, each optionally 'name:version', "
              "e.g. ausdiab:0.7.5,cdah:0.8.1,edcad.",
     ),
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     version: str = typer.Option(
         None,
         "--version",

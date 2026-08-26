@@ -14,6 +14,7 @@ import typer
 
 from g3dt import config
 from g3dt.cli._internal import resolve
+from g3dt.cli._internal.helptext import ENV_OPT
 from g3dt.upload.metadata_submitter import create_boto3_session
 
 app = typer.Typer(no_args_is_help=True, help="Watch the dbt CodePipeline/CodeBuild.")
@@ -37,7 +38,7 @@ def _resolved(env: str):
 
 @app.command()
 def status(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     which: str = typer.Option(
         "writeReleaseInfo",
         "--which",
@@ -69,7 +70,7 @@ def status(
 
 @app.command()
 def logs(
-    env: str = typer.Option(None, "--env", "-e", help="Environment; selects the matching context (or use --ctx / `g3dt config use`)."),
+    env: str = typer.Option(None, "--env", "-e", help=ENV_OPT),
     which: str = typer.Option(
         "dbtReleaseBuilder",
         "--which",

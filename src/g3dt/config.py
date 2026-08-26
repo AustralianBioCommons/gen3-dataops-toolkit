@@ -193,7 +193,7 @@ def require_project(marker: Optional[dict] = None) -> str:
 def llm_api_key_file(marker: Optional[dict] = None) -> Optional[str]:
     """Path to the file holding the synth LLM API key, from the marker.
 
-    Set once per operator with ``g3dt config set llm_api_key_file <path>``.
+    Set once per operator with ``g3dt synth set-key <path>``.
     Returns ``None`` when unset — gen3-metadata-simulator then falls back to
     the vendor's standard env var (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY``).
     """

@@ -1,4 +1,4 @@
-"""`acdc jobs` — track EC2-dispatched runs by their friendly run id."""
+"""`g3dt jobs` — track EC2-dispatched runs by their friendly run id."""
 from __future__ import annotations
 
 from typing import Optional
