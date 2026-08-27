@@ -191,3 +191,98 @@ def test_one_failure_fails_the_batch_and_logs_the_version(stub_python):
     logs = list((Path(env["HOME"]) / ".g3dt" / "logs").glob("*_delete_failed.log"))
     assert len(logs) == 1
     assert "failme_staging version=0.7.5" in logs[0].read_text()
+
+
+def test_synthetic_all_routes_to_project_worker_with_program(stub_python):
+    """
+    Background:
+        Synthetic projects are not in the study registry, so the whole-project
+        worker must be told to skip the registry lookup (--synthetic) and
+        which program the project lives under — synthetic uploads always land
+        under the submitter default, so the program travels explicitly.
+
+    Inputs:  --studies "synthetic_dataset_1:all" --synthetic
+    Expected Output: routed to delete_all_metadata_for_project.py with
+    --synthetic and --program-id program1, and no --version.
+    """
+    env, record = stub_python
+
+    _run(env, "--studies", "synthetic_dataset_1:all",
+         "--env", "test", "--synthetic")
+
+    calls = record.read_text().strip().splitlines()
+    assert len(calls) == 1
+    assert "delete_all_metadata_for_project.py" in calls[0]
+    assert "--study synthetic_dataset_1" in calls[0]
+    assert "--synthetic" in calls[0]
+    assert "--program-id program1" in calls[0]
+    assert "--version" not in calls[0]
+
+
+def test_synthetic_specific_version_routes_to_graphql_worker(stub_python):
+    """
+    Background:
+        Synthetic uploads write no Athena receipts, so a specific version can
+        never route to the Athena GUID worker — it must go to the GraphQL
+        data_version worker instead, carrying the version verbatim and any
+        non-default program.
+
+    Inputs:  --studies "synthetic_dataset_1:v1.3.0" --synthetic
+             --program-id prog2
+    Expected Output: routed to delete_synth_metadata_by_version.py with the
+    verbatim version, the program override, and --skip-if-empty.
+    """
+    env, record = stub_python
+
+    _run(env, "--studies", "synthetic_dataset_1:v1.3.0",
+         "--env", "test", "--synthetic", "--program-id", "prog2")
+
+    calls = record.read_text().strip().splitlines()
+    assert len(calls) == 1
+    assert "delete_synth_metadata_by_version.py" in calls[0]
+    assert "--version v1.3.0" in calls[0]
+    assert "--program-id prog2" in calls[0]
+    assert "--skip-if-empty" in calls[0]
+
+
+def test_synthetic_mixed_versions_route_per_study(stub_python):
+    """
+    Background:
+        As with registered studies, the worker choice is per study inside the
+        loop — one synthetic batch can wipe one project entirely while
+        removing a single data version from another.
+
+    Inputs:  --studies "s1:all,s2:v1.3.0" --synthetic
+    Expected Output: s1 to the project worker, s2 to the GraphQL worker.
+    """
+    env, record = stub_python
+
+    _run(env, "--studies", "s1:all,s2:v1.3.0", "--env", "test", "--synthetic")
+
+    calls = record.read_text().strip().splitlines()
+    assert len(calls) == 2
+    assert "delete_all_metadata_for_project.py" in calls[0]
+    assert "--synthetic" in calls[0]
+    assert "delete_synth_metadata_by_version.py" in calls[1]
+    assert "--version v1.3.0" in calls[1]
+
+
+def test_synthetic_skip_exit_code_counts_as_skip(stub_python):
+    """
+    Background:
+        The GraphQL worker exits 3 when no records carry the requested
+        data_version — the expected outcome for a batch generated before
+        stamping existed. The bulk loop must count that as skipped, not
+        failed, exactly as it does for the Athena worker.
+
+    Inputs:  one skipping synthetic study and one succeeding
+    Expected Output: overall exit 0; 1 deleted / 1 skipped.
+    """
+    env, _ = stub_python
+
+    result = _run(env, "--studies", "skipme_synth:v1.0.0,ok_synth:v1.0.0",
+                  "--env", "test", "--synthetic")
+
+    assert result.returncode == 0
+    assert "Deleted       : 1" in result.stdout
+    assert "Skipped       : 1" in result.stdout

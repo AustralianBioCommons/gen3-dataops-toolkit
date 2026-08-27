@@ -202,6 +202,84 @@ def delete_records_by_guid(
         )
 
 
+def delete_node_records_by_property(
+    gen3_submission: Gen3Submission,
+    program_id: str,
+    project_id: str,
+    node: str,
+    property_name: str,
+    property_value: str,
+    page_size: int = 100,
+    batch_size: int = 40,
+    batch_delay: float = 0.5,
+    verbose: bool = False,
+) -> int:
+    """
+    Deletes every record of one node whose ``property_name`` equals
+    ``property_value``, via the sheepdog GraphQL endpoint — no Athena
+    receipts required.
+
+    Pages with query -> delete -> re-query until the query returns no
+    records (the same pattern the SDK's own delete_nodes uses), so a
+    partially failed batch is simply retried on the next round. If two
+    consecutive rounds return the same first id, no progress is being
+    made (e.g. every deletion is failing) and a RuntimeError is raised.
+
+    GraphQL errors from the query (e.g. the node's schema does not
+    declare the property) propagate to the caller as
+    Gen3SubmissionQueryError — per-node tolerance is the caller's
+    decision, not this function's.
+
+    Args:
+        gen3_submission (Gen3Submission): An authenticated
+            Gen3Submission instance.
+        program_id (str): The Gen3 program name.
+        project_id (str): The Gen3 project name (bare, not compound).
+        node (str): The node type to delete records from.
+        property_name (str): Node property to filter on
+            (e.g. "data_version").
+        property_value (str): Exact value the property must equal.
+        page_size (int, optional): Records fetched per query round.
+        batch_size (int, optional): Passed to delete_records_by_guid.
+        batch_delay (float, optional): Passed to delete_records_by_guid.
+        verbose (bool, optional): Passed to delete_records_by_guid.
+
+    Returns:
+        int: Number of distinct records deleted.
+    """
+    compound_project_id = f"{program_id}-{project_id}"
+    seen = set()
+    first_uuid = ""
+    while True:
+        query_string = (
+            f'{{ {node} (first: {page_size}, '
+            f'project_id: "{compound_project_id}", '
+            f'{property_name}: "{property_value}") {{ id }} }}'
+        )
+        res = gen3_submission.query(query_string)
+        uuids = [x["id"] for x in res["data"][node]]
+        if not uuids:
+            break
+        if first_uuid == uuids[0]:
+            raise RuntimeError(
+                f"No progress deleting '{node}' records with "
+                f"{property_name}='{property_value}' — record "
+                f"{uuids[0]} keeps reappearing (deletions failing?)."
+            )
+        first_uuid = uuids[0]
+        seen.update(uuids)
+        delete_records_by_guid(
+            gen3_submission,
+            program_id,
+            project_id,
+            uuids,
+            batch_size=batch_size,
+            batch_delay=batch_delay,
+            verbose=verbose,
+        )
+    return len(seen)
+
+
 def delete_project_metadata(
     gen3_submission: Gen3Submission,
     program_id: str,

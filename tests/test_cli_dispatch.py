@@ -185,6 +185,48 @@ def test_delete_metadata_on_ec2_sends_ssm_command(mock_session, mock_record):
 
 
 @mock_aws
+@patch("g3dt.cli._internal.registry.record")
+@patch("g3dt.cli._internal.dispatch.create_boto3_session")
+def test_delete_metadata_synthetic_on_ec2_forwards_flags(mock_session, mock_record):
+    """
+    Background:
+        The EC2 dispatch re-invokes the CLI on the box, which re-parses
+        --studies from scratch. Without --synthetic in the remote command the
+        re-entry would look the raw names up in the study registry and exit 2
+        — after the operator already confirmed the deletion locally. The flag
+        (and any explicit --program-id) must survive the hop.
+
+    Inputs:  delete metadata --studies synthetic_dataset_1 --synthetic
+             --program-id program2 --version v1.3.0 --on ec2 --yes
+    Expected: remote command carries --synthetic, --program-id program2, the
+    verbatim version, and --yes.
+    """
+    _seed_env()
+    ssm = MagicMock()
+    ssm.send_command.return_value = {"Command": {"CommandId": "cmd-syn"}}
+    session = MagicMock()
+    session.client.return_value = ssm
+    mock_session.return_value = session
+
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "synthetic_dataset_1",
+         "--env", "staging", "--synthetic", "--program-id", "program2",
+         "--version", "v1.3.0", "--on", "ec2", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+
+    command = ssm.send_command.call_args.kwargs["Parameters"]["commands"][0]
+    assert "g3dt delete metadata" in command
+    assert "--studies synthetic_dataset_1" in command
+    assert "--synthetic" in command
+    assert "--program-id program2" in command
+    assert "--version v1.3.0" in command
+    assert "--env staging_ec2" in command
+    assert "--yes" in command
+
+
+@mock_aws
 @patch("g3dt.cli._internal.dispatch.create_boto3_session")
 def test_on_ec2_without_instance_id_errors(mock_session):
     """

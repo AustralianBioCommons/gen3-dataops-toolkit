@@ -34,6 +34,9 @@ Options:
                          'random' needs no key; 'llm' uses \$G3DT_LLM_PROVIDER /
                          \$G3DT_LLM_MODEL / \$LLM_API_KEY_FILE (set by g3dt).
   --seed N               RNG seed for reproducible output.
+  --data-version V       Stamp every record's data_version property with V
+                         (requires the dictionary to declare data_version;
+                         enables versioned deletion later).
   --output-root DIR      Root output dir. Default: ${DEFAULT_OUTPUT_ROOT}
   -h, --help             Show this help and exit.
 
@@ -57,6 +60,7 @@ STUDIES="${DEFAULT_STUDIES}"
 NUM_RECORDS="${DEFAULT_NUM_RECORDS}"
 PROVIDER="${DEFAULT_PROVIDER}"
 SEED=""
+DATA_VERSION=""
 OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT}"
 
 while [[ $# -gt 0 ]]; do
@@ -67,6 +71,7 @@ while [[ $# -gt 0 ]]; do
         --num-records)  NUM_RECORDS="$2"; shift 2 ;;
         --provider)     PROVIDER="$2"; shift 2 ;;
         --seed)         SEED="$2"; shift 2 ;;
+        --data-version) DATA_VERSION="$2"; shift 2 ;;
         --output-root)  OUTPUT_ROOT="$2"; shift 2 ;;
         -h|--help)      usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage; exit 1 ;;
@@ -122,6 +127,9 @@ for i in "${!STUDY_ARRAY[@]}"; do
          --num-records "$N"
          --provider "$PROVIDER")
     [[ -n "$SEED" ]] && CMD+=(--seed "$SEED")
+    # --set pins a declared data property to a constant on every record; the
+    # simulator errors before generating if no node declares data_version.
+    [[ -n "$DATA_VERSION" ]] && CMD+=(--set "data_version=${DATA_VERSION}")
     if [[ "$PROVIDER" == "llm" ]]; then
         # Vendor/model resolved by g3dt (flags > SSM > default) and forwarded
         # as simulator flags, because the simulator's own precedence puts

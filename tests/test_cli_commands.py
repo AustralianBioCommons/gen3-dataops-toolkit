@@ -602,6 +602,123 @@ def test_delete_metadata_rejects_malformed_version(mock_run, _study, _env):
     assert "Invalid version" in result.output
 
 
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_synthetic_bypasses_registry_and_defaults_all(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        Synthetic datasets are not registered studies — they have no
+        s3_metadata_path, so the SSM study registry lookup that every
+        --studies name normally goes through can only fail for them. The
+        --synthetic flag must skip the registry entirely (the raw name IS
+        the Gen3 project id) and, since its purpose is "wipe the synthetic
+        project", bare names default to version 'all' instead of erroring.
+
+    Inputs:  --studies "synthetic_dataset_1,synthetic_dataset_2" --synthetic
+             (no --version; 'y' at the unskippable all-versions prompt)
+    Expected: exit 0; study_of NEVER called; wrapper argv carries the raw
+    names, --version all, --synthetic, and --program-id program1.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies",
+         "synthetic_dataset_1,synthetic_dataset_2",
+         "--env", "test", "--synthetic"],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    _study.assert_not_called()
+    argv = _argv(mock_run)
+    assert argv[argv.index("--studies") + 1] == (
+        "synthetic_dataset_1,synthetic_dataset_2"
+    )
+    assert argv[argv.index("--version") + 1] == "all"
+    assert "--synthetic" in argv
+    assert argv[argv.index("--program-id") + 1] == "program1"
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_synthetic_keeps_version_verbatim(mock_run, _study, _env):
+    """
+    Background:
+        Non-synthetic versions are normalised to the Athena column format
+        (leading 'v' stripped — see the strips_leading_v test above). But a
+        synthetic version is matched verbatim against the records'
+        data_version property, and the natural label there is the dictionary
+        version WITH its 'v' (batch dirs are ~/.g3dt/synth_metadata/v1.3.0/).
+        Stripping would silently match zero records.
+
+    Inputs:  --synthetic --version v1.3.0 --yes
+    Expected: wrapper argv carries exactly 'v1.3.0'; no prompt (not 'all').
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "synthetic_dataset_1",
+         "--env", "test", "--synthetic", "--version", "v1.3.0", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    _study.assert_not_called()
+    argv = _argv(mock_run)
+    assert argv[argv.index("--version") + 1] == "v1.3.0"
+    assert "--synthetic" in argv
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_synthetic_per_study_versions(mock_run, _study, _env):
+    """
+    Background:
+        The per-study 'name:version' syntax must keep working in synthetic
+        mode, with raw (unresolved) names in the qualified spec, and one
+        'all' anywhere still forcing the prompt regardless of --yes.
+
+    Inputs:  --studies "s1:all,s2:v1.3.0" --synthetic --yes ('y' at prompt)
+    Expected: qualified spec passes raw names/versions; no --version flag.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "s1:all,s2:v1.3.0",
+         "--env", "test", "--synthetic", "--yes"],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[argv.index("--studies") + 1] == "s1:all,s2:v1.3.0"
+    assert "--version" not in argv
+    assert "--synthetic" in argv
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_program_id_without_synthetic_is_usage_error(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        Registered studies carry their program in the study registry; letting
+        --program-id silently override it for a registry delete would target
+        the wrong program. The flag is only meaningful with --synthetic.
+
+    Inputs:  --program-id program2 without --synthetic
+    Expected: exit 2, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab",
+         "--env", "staging", "--version", "all", "--program-id", "program2"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "--synthetic" in result.output
+
+
 @patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
 @patch("g3dt.cli._internal.runner.run")
 def test_k8s_restart_schema_passes_env_argo_args(mock_run, _env):

@@ -82,6 +82,21 @@ def main():
         help="Environment to use (selects AWS secret, profile, etc.)",
     )
     parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        default=False,
+        help=(
+            "Registry-free mode for synthetic data: --study is used directly "
+            "as the Gen3 project code (no SSM study registry lookup), with "
+            "the program from --program-id."
+        ),
+    )
+    parser.add_argument(
+        "--program-id",
+        default="program1",
+        help="Gen3 program for --synthetic mode.",
+    )
+    parser.add_argument(
         "--import-order",
         default="DataImportOrder.txt",
         help="Path to DataImportOrder.txt",
@@ -106,15 +121,20 @@ def main():
 
     # Env facts from SSM; the study registry from the marker or
     # SSM /{project}/{env}/studies/* (legacy studies.yaml fallback until 5.0).
+    # Synthetic projects are not registered studies: --synthetic skips the
+    # registry and takes --study as the Gen3 project code itself.
     try:
         env_cfg = g3dt_config.resolve_env(args.env)
-        study_cfg = g3dt_config.resolve_study(args.study, args.env)
+        if args.synthetic:
+            project_id = args.study
+            program_id = args.program_id
+        else:
+            study_cfg = g3dt_config.resolve_study(args.study, args.env)
+            project_id = study_cfg.project_id
+            program_id = study_cfg.program_id
     except g3dt_config.ConfigError as exc:
         logger.error(str(exc))
         sys.exit(1)
-
-    project_id = study_cfg.project_id
-    program_id = study_cfg.program_id
 
     aws_secret_name = env_cfg.aws_secret_name
     aws_profile = env_cfg.aws_profile

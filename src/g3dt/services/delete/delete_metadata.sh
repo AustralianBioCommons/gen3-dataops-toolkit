@@ -10,21 +10,26 @@ SKIP_EXIT_CODE=3
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") --studies <name[:version|all],...> --env <environment> [--version <version|all>] [--node <node>]
+Usage: $(basename "$0") --studies <name[:version|all],...> --env <environment> [--version <version|all>] [--node <node>] [--synthetic] [--program-id <program>]
 
 Delete metadata for each study sequentially, in a single job.
 
 Arguments:
-  --studies   Comma-separated study config keys, each optionally qualified with
-              its own version (e.g. ausdiab_staging:0.7.5,cdah_staging:0.8.1,
-              or bare ausdiab_staging to take the --version default)
-  --env       Environment string passed to the Python worker (e.g. staging_ec2)
-  --version   Default version for bare --studies entries (e.g. 0.9.8), or 'all'
-  --node      (optional) Restrict deletion to a single node type
+  --studies    Comma-separated study config keys, each optionally qualified with
+               its own version (e.g. ausdiab_staging:0.7.5,cdah_staging:0.8.1,
+               or bare ausdiab_staging to take the --version default)
+  --env        Environment string passed to the Python worker (e.g. staging_ec2)
+  --version    Default version for bare --studies entries (e.g. 0.9.8), or 'all'
+  --node       (optional) Restrict deletion to a single node type
+  --synthetic  (optional) Registry-free synthetic-data mode: each study name is
+               the Gen3 project code itself (no SSM study registry lookup)
+  --program-id (optional) Gen3 program for --synthetic mode (default program1)
 
 Behaviour:
   * version 'all'          -> delete_all_metadata_for_project.py (deletes whole nodes)
   * version <x.y.z>        -> delete_metadata_by_guid.py (Athena GUID lookup for that version)
+  * --synthetic + 'all'    -> delete_all_metadata_for_project.py --synthetic
+  * --synthetic + version  -> delete_synth_metadata_by_version.py (GraphQL data_version filter)
 
   A study that exists but has no data at the requested version is skipped and the
   loop continues. Only genuine errors (Gen3/AWS failures) count as failures.
@@ -45,6 +50,8 @@ STUDIES=""
 ENV=""
 VERSION=""
 NODE=""
+SYNTHETIC=0
+PROGRAM_ID="program1"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -62,6 +69,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --node)
             NODE="$2"
+            shift 2
+            ;;
+        --synthetic)
+            SYNTHETIC=1
+            shift
+            ;;
+        --program-id)
+            PROGRAM_ID="$2"
             shift 2
             ;;
         *)
@@ -122,6 +137,7 @@ echo "Environment : ${ENV}"
 echo "Studies     : ${STUDIES}"
 echo "Version     : ${VERSION:-(per study, from --studies)}"
 [[ -n "$NODE" ]] && echo "Node        : ${NODE}"
+[[ $SYNTHETIC -eq 1 ]] && echo "Synthetic   : yes (program: ${PROGRAM_ID})"
 echo "Failure log : ${FAILED_LOG}"
 echo "============================================"
 echo ""
@@ -140,6 +156,12 @@ for i in "${!STUDY_NAMES[@]}"; do
     if [[ "$study_version_lc" == "all" ]]; then
         CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_all_metadata_for_project.py"
              --study "$study" --env "$ENV")
+        [[ $SYNTHETIC -eq 1 ]] && CMD+=(--synthetic --program-id "$PROGRAM_ID")
+        [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
+    elif [[ $SYNTHETIC -eq 1 ]]; then
+        CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_synth_metadata_by_version.py"
+             --study "$study" --env "$ENV" --version "$study_version"
+             --program-id "$PROGRAM_ID" --skip-if-empty)
         [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     else
         CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_metadata_by_guid.py"

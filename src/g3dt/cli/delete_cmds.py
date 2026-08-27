@@ -7,6 +7,13 @@ the bare names (a specific version like ``0.9.8``, resolved via an Athena GUID
 lookup, or ``all`` for every version). A bare study with no version anywhere
 is refused (exit 2).
 
+``--synthetic`` switches to registry-free mode for synthetic data: each
+``--studies`` name is the Gen3 project code itself (no SSM study registry —
+synthetic projects are never registered), bare names default to version
+``all``, and a specific version is matched verbatim against the records'
+``data_version`` property via GraphQL rather than Athena receipts (synthetic
+uploads write none).
+
 Every command confirms before acting. Production always requires typing the
 target id, even with ``--yes``. Deleting ALL versions always prompts, even with
 ``--yes``. Confirmation happens locally before any EC2 dispatch (SSM has no
@@ -61,12 +68,30 @@ def _normalise_version(raw: str, where: str) -> str:
     return match.group(1)
 
 
-def _parse_study_specs(studies: str, fallback, env: str):
+def _synthetic_version(raw: str) -> str:
+    """Canonicalise a synthetic version token: ``all`` (any case) or verbatim.
+
+    Synthetic versions are matched exactly against the records' ``data_version``
+    property, and the natural label there is the dictionary version WITH its
+    leading ``v`` (batch dirs are ``~/.g3dt/synth_metadata/v1.3.0/...``) — so
+    unlike ``_normalise_version`` nothing is stripped. A version that matches
+    no records is reported by the worker (skip + hint), not silently absorbed.
+    """
+    token = raw.strip()
+    return "all" if token.lower() == "all" else token
+
+
+def _parse_study_specs(studies: str, fallback, env: str, synthetic: bool = False):
     """Turn ``--studies`` into ``[(resolved_study_key, version), ...]``.
 
     Each comma-separated entry is ``name`` or ``name:version``. A bare name
     takes *fallback* (the ``--version`` default); *fallback* is ``None`` when
-    ``--version`` was not given, which makes a bare name a usage error.
+    ``--version`` was not given, which makes a bare name a usage error —
+    except with *synthetic*, where a bare name defaults to ``all`` (the whole
+    point of the flag is "wipe the synthetic project").
+
+    With *synthetic* the raw name IS the Gen3 project code: no study-registry
+    lookup, and version tokens pass through :func:`_synthetic_version`.
 
     Every entry is validated before anything is dispatched, so a typo in the
     last study cannot leave the earlier ones already deleted.
@@ -102,9 +127,15 @@ def _parse_study_specs(studies: str, fallback, env: str):
             raise typer.Exit(2)
 
         if sep:
-            version = _normalise_version(raw_version, f"for study '{name}'")
+            version = (
+                _synthetic_version(raw_version)
+                if synthetic
+                else _normalise_version(raw_version, f"for study '{name}'")
+            )
         elif fallback is not None:
             version = fallback
+        elif synthetic:
+            version = "all"
         else:
             typer.secho(
                 f"No version for study '{name}': add ':<version>' to it "
@@ -115,7 +146,7 @@ def _parse_study_specs(studies: str, fallback, env: str):
             )
             raise typer.Exit(2)
 
-        specs.append((study_of(name, env).key, version))
+        specs.append((name if synthetic else study_of(name, env).key, version))
 
     if not specs:
         typer.secho("--studies is empty.", fg=typer.colors.RED, err=True)
@@ -141,6 +172,20 @@ def metadata(
              "':version', e.g. 0.9.8, or 'all' for every version.",
     ),
     node: Optional[str] = typer.Option(None, "--node", help="Delete only this node type."),
+    synthetic: bool = typer.Option(
+        False,
+        "--synthetic",
+        help="Registry-free synthetic-data mode: each --studies name is the "
+             "Gen3 project id itself (no SSM study registry). Bare names "
+             "default to version 'all'; a specific version matches records' "
+             "data_version property verbatim.",
+    ),
+    program_id: Optional[str] = typer.Option(
+        None,
+        "--program-id",
+        help="Gen3 program for --synthetic (default: program1). "
+             "Invalid without --synthetic.",
+    ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the non-prod prompt (specific-version only)."
     ),
@@ -156,12 +201,24 @@ def metadata(
 
       g3dt delete metadata --studies "ausdiab:0.7.5,cdah:0.8.1" --env staging
       g3dt delete metadata --studies "ausdiab:all,cdah" --version 0.9.8 --env staging
+      g3dt delete metadata --studies "synthetic_dataset_1,synthetic_dataset_2" --env test --synthetic
     """
     env = resolve.active_env(env)
-    fallback = (
-        _normalise_version(version, "for --version") if version is not None else None
-    )
-    specs = _parse_study_specs(studies, fallback, env)
+    if program_id is not None and not synthetic:
+        typer.secho(
+            "--program-id is only valid with --synthetic (registered studies "
+            "carry their program in the study registry).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    if version is None:
+        fallback = None
+    elif synthetic:
+        fallback = _synthetic_version(version)
+    else:
+        fallback = _normalise_version(version, "for --version")
+    specs = _parse_study_specs(studies, fallback, env, synthetic=synthetic)
     versions = [v for _, v in specs]
 
     # The typed production confirmation stays the study keys alone: short
@@ -171,13 +228,17 @@ def metadata(
     uniform = len(set(versions)) == 1
     any_all = "all" in versions
 
+    prefix = "synthetic " if synthetic else ""
     if uniform and versions[0] == "all":
-        action = "deletion of ALL VERSIONS"
+        action = f"{prefix}deletion of ALL VERSIONS"
     elif uniform:
-        action = f"deletion of v{versions[0]}"
+        # Synthetic versions are verbatim data_version values (often already
+        # v-prefixed); Athena versions are canonical x.y.z, displayed with v.
+        shown = versions[0] if synthetic else f"v{versions[0]}"
+        action = f"{prefix}deletion of {shown}"
     else:
         plan = ", ".join(f"{key}:{v}" for key, v in specs)
-        action = f"deletion of per-study versions [{plan}]"
+        action = f"{prefix}deletion of per-study versions [{plan}]"
 
     # Deleting every version is the most destructive path: always prompt (pass
     # assume_yes=False so --yes can't bypass it; prod still types the target).
@@ -200,6 +261,11 @@ def metadata(
             ]
         if node:
             a += ["--node", node]
+        if synthetic:
+            # Program is always passed explicitly: the shell default makes it
+            # optional on the wire, but an explicit value keeps the contract
+            # visible in logs and SSM command history.
+            a += ["--synthetic", "--program-id", program_id or "program1"]
         return a
 
     def remote_cli(env_name):
@@ -212,6 +278,12 @@ def metadata(
         a.append("--yes")
         if node:
             a += ["--node", node]
+        if synthetic:
+            # Without this the remote re-entry would re-parse --studies
+            # against the study registry on the box and exit 2.
+            a.append("--synthetic")
+            if program_id is not None:
+                a += ["--program-id", program_id]
         return a
 
     dispatch.run_or_dispatch(

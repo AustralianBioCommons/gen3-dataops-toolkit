@@ -234,3 +234,54 @@ def test_delete_metadata_requires_version(mock_run):
     )
     assert result.exit_code == 2
     mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_synthetic_bare_names_prompt_even_with_yes(
+    mock_run, _study, _env
+):
+    """
+    Inputs:  g3dt delete metadata --studies synthetic_dataset_1 --env staging
+             --synthetic --yes   (empty confirmation)
+    Expected Output: exit code 1 and the deletion never runs.
+
+    In synthetic mode a bare study name deliberately defaults to version
+    'all' (the flag's purpose is "wipe the synthetic project") — but that
+    must keep the all-versions guarantee: the unskippable prompt applies, so
+    --yes alone can never wipe a project unattended.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "synthetic_dataset_1",
+         "--env", "staging", "--synthetic", "--yes"],
+        input="\n",
+    )
+    assert result.exit_code == 1
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_synthetic_prod_requires_typed_target(
+    mock_run, _study, _env
+):
+    """
+    Inputs:  g3dt delete metadata --studies synthetic_dataset_1 --env prod
+             --synthetic --version v1.3.0   (empty confirmation)
+    Expected Output: exit code 1 and the deletion never runs.
+
+    --synthetic changes how studies resolve, not how production is guarded:
+    the typed-target gate must be exactly as strict as for registered
+    studies, with the raw project name as the token to type.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "synthetic_dataset_1",
+         "--env", "prod", "--synthetic", "--version", "v1.3.0"],
+        input="\n",
+    )
+    assert result.exit_code == 1
+    mock_run.assert_not_called()

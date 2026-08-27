@@ -370,6 +370,13 @@ def generate(
         None, "--version", "-v",
         help="Version label for output dir (default: env dictionary_version).",
     ),
+    data_version: Optional[str] = typer.Option(
+        None, "--data-version",
+        help="Stamp every generated record's data_version property with this "
+             "value (requires the dictionary to declare data_version). Makes "
+             "the batch deletable later with "
+             "'delete metadata --synthetic --version <value>'.",
+    ),
 ) -> None:
     """Generate synthetic metadata locally with gen3-metadata-simulator.
 
@@ -431,6 +438,8 @@ def generate(
         args += ["--num-records", num_records]
     if seed is not None:
         args += ["--seed", str(seed)]
+    if data_version:
+        args += ["--data-version", data_version]
     env_vars = script_env(e, ver)
     if effective_provider is Provider.llm:
         env_vars.update(

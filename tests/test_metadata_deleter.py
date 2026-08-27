@@ -5,10 +5,12 @@ import sys
 from unittest.mock import MagicMock, patch, call
 import pytest
 import pandas as pd
+from gen3.submission import Gen3SubmissionQueryError
 from g3dt.upload.metadata_deleter import (
     delete_project_metadata,
     query_metadata_upload_guids,
     delete_records_by_guid,
+    delete_node_records_by_property,
 )
 
 
@@ -562,3 +564,396 @@ def test_worker_without_flag_completes_but_warns_on_no_data(monkeypatch, caplog)
 
     assert "data version" in caplog.text.lower()
     assert "data_version" in caplog.text
+
+
+# ==========================================
+# Unit Tests — delete_node_records_by_property (GraphQL, registry-free)
+# ==========================================
+#
+# Synthetic uploads write no Athena receipts, so version-filtered deletion of
+# synthetic data queries sheepdog GraphQL for records whose data_version
+# property matches, then deletes by id — query -> delete -> re-query until the
+# node is empty (the SDK's own delete_nodes pattern).
+
+
+def _pages(*pages):
+    """A query side-effect returning one prepared page per call."""
+    it = iter(pages)
+
+    def _side_effect(_query):
+        return next(it)
+
+    return _side_effect
+
+
+def test_delete_node_records_by_property_query_shape_and_delete(mock_gen3_sub):
+    """
+    Tests the GraphQL filter shape and that every returned id is deleted.
+
+    Background:
+        Sheepdog's graphql filters on the COMPOUND project id
+        (program-project) and accepts any declared node property as an extra
+        argument. Getting either wrong silently matches zero records, which
+        would read as "nothing to delete" — so the exact query text is pinned.
+
+    Inputs:
+        One page of two subject ids with data_version 0.9.8, then an empty
+        page.
+
+    Expected Output:
+        - The query names the node, 'project_id: "program1-SynthP"', and
+          'data_version: "0.9.8"'.
+        - Both ids are deleted via delete_record; the function returns 2.
+    """
+    mock_gen3_sub.query.side_effect = _pages(
+        {"data": {"subject": [{"id": "u1"}, {"id": "u2"}]}},
+        {"data": {"subject": []}},
+    )
+
+    deleted = delete_node_records_by_property(
+        gen3_submission=mock_gen3_sub,
+        program_id="program1",
+        project_id="SynthP",
+        node="subject",
+        property_name="data_version",
+        property_value="0.9.8",
+    )
+
+    assert deleted == 2
+    query_text = mock_gen3_sub.query.call_args_list[0].args[0]
+    assert "subject (first: 100" in query_text
+    assert 'project_id: "program1-SynthP"' in query_text
+    assert 'data_version: "0.9.8"' in query_text
+    deleted_ids = [
+        c.args[2] for c in mock_gen3_sub.delete_record.call_args_list
+    ]
+    assert deleted_ids == ["u1", "u2"]
+
+
+def test_delete_node_records_by_property_paginates_until_empty(mock_gen3_sub):
+    """
+    Tests that deletion keeps re-querying until the node has no matches left.
+
+    Background:
+        One query page holds at most page_size records, so a node with more
+        matches than one page must be drained across rounds — stopping after
+        the first page would leave records behind while reporting success.
+
+    Inputs:
+        Two non-empty pages (2 ids, then 1 new id), then an empty page.
+
+    Expected Output:
+        - Three queries issued; return value 3 (distinct ids deleted).
+    """
+    mock_gen3_sub.query.side_effect = _pages(
+        {"data": {"subject": [{"id": "u1"}, {"id": "u2"}]}},
+        {"data": {"subject": [{"id": "u3"}]}},
+        {"data": {"subject": []}},
+    )
+
+    deleted = delete_node_records_by_property(
+        gen3_submission=mock_gen3_sub,
+        program_id="p",
+        project_id="proj",
+        node="subject",
+        property_name="data_version",
+        property_value="v1.3.0",
+    )
+
+    assert deleted == 3
+    assert mock_gen3_sub.query.call_count == 3
+
+
+def test_delete_node_records_by_property_raises_when_stuck(mock_gen3_sub):
+    """
+    Tests the no-progress guard.
+
+    Background:
+        delete_records_by_guid tolerates per-id failures by design, so if
+        EVERY deletion in a round fails (e.g. a permissions problem), the next
+        query returns the same page and the loop would spin forever. Seeing
+        the same first id twice means no progress — abort loudly.
+
+    Inputs:
+        The same page returned on every query.
+
+    Expected Output:
+        - RuntimeError naming the node; no infinite loop.
+    """
+    page = {"data": {"subject": [{"id": "u1"}]}}
+    mock_gen3_sub.query.side_effect = _pages(page, page)
+
+    with pytest.raises(RuntimeError, match="subject"):
+        delete_node_records_by_property(
+            gen3_submission=mock_gen3_sub,
+            program_id="p",
+            project_id="proj",
+            node="subject",
+            property_name="data_version",
+            property_value="v1.3.0",
+        )
+
+
+def test_delete_node_records_by_property_propagates_query_error(mock_gen3_sub):
+    """
+    Tests that a GraphQL rejection reaches the caller untouched.
+
+    Background:
+        A node whose schema does not declare the filter property makes
+        sheepdog return a graphql error (Gen3SubmissionQueryError). Whether
+        that is tolerable is a per-node policy decision that belongs to the
+        worker loop — the library function must not swallow it.
+
+    Inputs:
+        query raises Gen3SubmissionQueryError.
+
+    Expected Output:
+        - The same exception type propagates; nothing was deleted.
+    """
+    mock_gen3_sub.query.side_effect = Gen3SubmissionQueryError("unknown argument")
+
+    with pytest.raises(Gen3SubmissionQueryError):
+        delete_node_records_by_property(
+            gen3_submission=mock_gen3_sub,
+            program_id="p",
+            project_id="proj",
+            node="subject",
+            property_name="data_version",
+            property_value="v1.3.0",
+        )
+    mock_gen3_sub.delete_record.assert_not_called()
+
+
+# ==========================================
+# Worker script — delete_synth_metadata_by_version.py (registry-free)
+# ==========================================
+
+_SYNTH_WORKER_PATH = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "src" / "g3dt" / "services" / "delete"
+    / "delete_synth_metadata_by_version.py"
+)
+
+_ALL_WORKER_PATH = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "src" / "g3dt" / "services" / "delete"
+    / "delete_all_metadata_for_project.py"
+)
+
+
+def _load_script(path, name):
+    """Import a packaged worker script as a fresh module object."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _stub_synth_worker_env(mod, monkeypatch):
+    """Stub the synth worker's config + auth chain (no AWS, no Gen3).
+
+    resolve_study is patched to RAISE: the whole point of this worker is that
+    synthetic projects are not registered studies, so any registry lookup is
+    a regression.
+    """
+    from g3dt.config import EnvConfig
+
+    env_cfg = EnvConfig(
+        name="test", is_ec2=False, region="ap-southeast-2",
+        dictionary_version="v1", aws_profile=None, aws_secret_name="sec",
+        schema_s3_uri="u", domain="d", app_name="a", namespace="n",
+        cluster_name="c", schema_repo="Org/schema-repo",
+    )
+    monkeypatch.setattr(mod.g3dt_config, "resolve_env", lambda *a, **k: env_cfg)
+    monkeypatch.setattr(
+        mod.g3dt_config, "resolve_study",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("registry lookup in registry-free worker")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(mod, "create_boto3_session", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        mod, "get_gen3_api_key_aws_secret", lambda *a, **k: {"api_key": "jwt"}
+    )
+    monkeypatch.setattr(
+        mod, "create_gen3_submission_class", lambda *a, **k: MagicMock()
+    )
+
+
+def test_synth_version_worker_never_touches_study_registry(monkeypatch):
+    """
+    Tests that the version worker is genuinely registry-free.
+
+    Background:
+        The original failure this feature fixes was 'Study not found — no
+        studies are registered' for synthetic projects. The worker takes
+        --study as the Gen3 project code itself; if anyone reintroduces a
+        resolve_study call, this test's poisoned stub trips immediately.
+
+    Inputs:
+        --study synthetic_dataset_1 --version v1.3.0 --node subject, with
+        resolve_study patched to raise and the deleter reporting 2 records.
+
+    Expected Output:
+        - main() completes normally; the deleter got the raw project id and
+          verbatim version.
+    """
+    mod = _load_script(_SYNTH_WORKER_PATH, "synth_worker_registry_free")
+    _stub_synth_worker_env(mod, monkeypatch)
+    calls = []
+
+    def fake_delete(**kwargs):
+        calls.append(kwargs)
+        return 2
+
+    monkeypatch.setattr(mod, "delete_node_records_by_property", fake_delete)
+    monkeypatch.setattr(sys, "argv", [
+        "delete_synth_metadata_by_version.py", "--study", "synthetic_dataset_1",
+        "--env", "test", "--version", "v1.3.0", "--node", "subject",
+    ])
+
+    mod.main()  # returns; no SystemExit
+
+    assert len(calls) == 1
+    assert calls[0]["project_id"] == "synthetic_dataset_1"
+    assert calls[0]["program_id"] == "program1"
+    assert calls[0]["property_name"] == "data_version"
+    assert calls[0]["property_value"] == "v1.3.0"
+
+
+def test_synth_version_worker_tolerates_per_node_query_error(
+    monkeypatch, tmp_path, caplog
+):
+    """
+    Tests per-node tolerance of GraphQL rejections.
+
+    Background:
+        Dictionaries adopt the data_version property node by node; a node
+        whose schema lacks it makes the query error. That must skip THAT node
+        with a warning and keep deleting the others — otherwise one lagging
+        node blocks the whole cleanup.
+
+    Inputs:
+        Two nodes via an import-order file; the first node's delete raises
+        Gen3SubmissionQueryError, the second deletes 2 records.
+
+    Expected Output:
+        - main() completes (no SystemExit); warning names the failing node.
+    """
+    mod = _load_script(_SYNTH_WORKER_PATH, "synth_worker_node_tolerance")
+    _stub_synth_worker_env(mod, monkeypatch)
+    order = tmp_path / "DataImportOrder.txt"
+    order.write_text("lab_result\nsubject\n")  # reversed -> subject first
+
+    def fake_delete(**kwargs):
+        if kwargs["node"] == "subject":
+            raise Gen3SubmissionQueryError("unknown argument data_version")
+        return 2
+
+    monkeypatch.setattr(mod, "delete_node_records_by_property", fake_delete)
+    monkeypatch.setattr(sys, "argv", [
+        "delete_synth_metadata_by_version.py", "--study", "s1",
+        "--env", "test", "--version", "v1.3.0",
+        "--import-order", str(order),
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        mod.main()  # returns; the query error did not become a failure
+
+    assert "subject" in caplog.text
+    assert "data_version" in caplog.text
+
+
+def test_synth_version_worker_zero_total_exits_skip_with_hint(
+    monkeypatch, caplog
+):
+    """
+    Tests the nothing-matched outcome.
+
+    Background:
+        Batches generated before data_version stamping existed carry no
+        version property, so a versioned delete finds nothing. The bulk loop
+        must count that as a skip (exit 3), and the operator needs the hint
+        naming the data_version property — not a silent clean-looking run.
+
+    Inputs:
+        --skip-if-empty with the deleter reporting 0 records.
+
+    Expected Output:
+        - SystemExit with code 3; the data_version hint is logged.
+    """
+    mod = _load_script(_SYNTH_WORKER_PATH, "synth_worker_zero_total")
+    _stub_synth_worker_env(mod, monkeypatch)
+    monkeypatch.setattr(
+        mod, "delete_node_records_by_property", lambda **k: 0
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "delete_synth_metadata_by_version.py", "--study", "s1",
+        "--env", "test", "--version", "v9.9.9", "--node", "subject",
+        "--skip-if-empty",
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SystemExit) as exc:
+            mod.main()
+
+    assert exc.value.code == mod.SKIP_EXIT_CODE
+    assert "data_version" in caplog.text
+
+
+def test_delete_all_worker_synthetic_mode_uses_raw_study_as_project(monkeypatch):
+    """
+    Tests the whole-project worker's registry-free synthetic mode.
+
+    Background:
+        'delete metadata --synthetic' (bare names -> version all) routes here.
+        With --synthetic the worker must not consult the study registry —
+        --study is the Gen3 project code and --program-id supplies the
+        program that synthetic uploads default to.
+
+    Inputs:
+        --synthetic --program-id p2 --study synthetic_dataset_1 --node subject,
+        resolve_study patched to raise.
+
+    Expected Output:
+        - delete_project_metadata called with project_id='synthetic_dataset_1'
+          and program_id='p2'.
+    """
+    mod = _load_script(_ALL_WORKER_PATH, "delete_all_worker_synthetic")
+    from g3dt.config import EnvConfig
+
+    env_cfg = EnvConfig(
+        name="test", is_ec2=False, region="ap-southeast-2",
+        dictionary_version="v1", aws_profile=None, aws_secret_name="sec",
+        schema_s3_uri="u", domain="d", app_name="a", namespace="n",
+        cluster_name="c", schema_repo="Org/schema-repo",
+    )
+    monkeypatch.setattr(mod.g3dt_config, "resolve_env", lambda *a, **k: env_cfg)
+    monkeypatch.setattr(
+        mod.g3dt_config, "resolve_study",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("registry lookup in --synthetic mode")
+        ),
+    )
+    monkeypatch.setattr(mod, "create_boto3_session", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        mod, "get_gen3_api_key_aws_secret", lambda *a, **k: {"api_key": "jwt"}
+    )
+    monkeypatch.setattr(
+        mod, "create_gen3_submission_class", lambda *a, **k: MagicMock()
+    )
+    captured = {}
+    monkeypatch.setattr(
+        mod, "delete_project_metadata", lambda **k: captured.update(k)
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "delete_all_metadata_for_project.py", "--study", "synthetic_dataset_1",
+        "--env", "test", "--synthetic", "--program-id", "p2",
+        "--node", "subject",
+    ])
+
+    mod.main()
+
+    assert captured["project_id"] == "synthetic_dataset_1"
+    assert captured["program_id"] == "p2"

@@ -105,6 +105,29 @@ def test_generate_passes_study_and_defaults_to_random(mock_run, _env, schema_dir
     assert argv[argv.index("--provider") + 1] == "random"
     assert argv[argv.index("--num-records") + 1] == "5"
     assert argv[argv.index("--version") + 1] == "v1.1.6"
+    assert "--data-version" not in argv
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_generate_data_version_is_forwarded(mock_run, _env, schema_dir):
+    """
+    Background:
+        Synthetic records carry no version marker by default, so a later
+        'delete metadata --synthetic --version X' matches nothing. Passing
+        --data-version at generation stamps every record (via the simulator's
+        --set override in the script), making the batch version-deletable.
+
+    Inputs:  g3dt synth generate AusDiab_Simulated --data-version v1.3.0
+    Expected: the script argv carries --data-version v1.3.0.
+    """
+    result = runner.invoke(
+        app,
+        ["synth", "generate", "AusDiab_Simulated", "--data-version", "v1.3.0"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _gen_argv(mock_run)
+    assert argv[argv.index("--data-version") + 1] == "v1.3.0"
 
 
 @patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)

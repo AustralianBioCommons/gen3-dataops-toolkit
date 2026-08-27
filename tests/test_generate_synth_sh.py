@@ -107,3 +107,32 @@ def test_random_provider_passes_no_llm_flags(stub_simulator, tmp_path):
     assert "--provider random" in recorded
     assert "--llm-provider" not in recorded
     assert "--env-file" not in recorded
+
+
+def test_data_version_is_forwarded_as_set_override(stub_simulator, tmp_path):
+    """
+    Background:
+        Synthetic records carry no version marker, which is why versioned
+        deletion ('delete metadata --synthetic --version X') matches nothing
+        on old batches. --data-version closes that loop: the simulator's --set
+        pins a declared property to a constant on every record, making the
+        batch version-deletable later.
+
+    Inputs:  --data-version v1.3.0
+    Expected: the simulator receives --set data_version=v1.3.0.
+    """
+    recorded = _run(
+        stub_simulator, tmp_path, extra_args=("--data-version", "v1.3.0")
+    )
+    assert "--set data_version=v1.3.0" in recorded
+
+
+def test_no_data_version_passes_no_set_override(stub_simulator, tmp_path):
+    """
+    Inputs:  no --data-version (the default)
+    Expected: no --set flag at all — dictionaries that do not declare
+             data_version would make the simulator error pre-generation, so
+             stamping must be strictly opt-in.
+    """
+    recorded = _run(stub_simulator, tmp_path)
+    assert "--set" not in recorded
