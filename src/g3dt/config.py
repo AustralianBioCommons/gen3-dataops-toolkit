@@ -40,6 +40,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -393,6 +394,8 @@ class EnvConfig:
     dictionary_version: str
     aws_profile: Optional[str]
     aws_secret_name: str
+    # Canonical scheme-less "bucket/key" (normalize_s3_location at resolve time;
+    # callers prepend s3:// themselves).
     schema_s3_uri: str
     domain: str
     app_name: str
@@ -419,6 +422,74 @@ class EnvConfig:
 def _app_or_default(rc, leaf: str, default: str) -> str:
     """Read an OPTIONAL ``app/<leaf>`` parameter, treating blank as unset."""
     return (rc.get(f"app/{leaf}") or "").strip() or default
+
+
+#: The two S3 endpoint URL host styles. Path-style must be tried first: a bare
+#: ``s3.<region>.amazonaws.com`` host would otherwise match the virtual-hosted
+#: pattern with bucket "s3". The virtual-hosted bucket group is greedy so
+#: dotted bucket names keep their dots.
+_S3_PATH_STYLE_HOST = re.compile(r"^s3([.-][a-z0-9-]+)*\.amazonaws\.com$")
+_S3_VIRTUAL_HOST = re.compile(r"^(?P<bucket>.+)\.s3([.-][a-z0-9-]+)*\.amazonaws\.com$")
+
+#: Remediation appended to normalize_s3_location errors for the SSM app fact.
+_SCHEMA_S3_URI_HINT = (
+    "Fix gen3.schemaS3Uri in the CDK config (gen3-aws-data-pipeline) and "
+    "re-run `cdk deploy`."
+)
+
+
+def normalize_s3_location(
+    value: str, *, param: str = "app/schema_s3_uri", hint: Optional[str] = None
+) -> str:
+    """Canonicalize an operator-supplied S3 location to scheme-less ``bucket[/key]``.
+
+    Accepted forms: ``bucket/key`` (canonical), ``s3://bucket/key`` — a repeated
+    scheme (``s3://s3://...``) is tolerated, since that is exactly what a
+    scheme-carrying SSM value produces once callers prepend ``s3://`` — and the
+    two S3 endpoint URL styles (``https://<bucket>.s3.<region>.amazonaws.com/<key>``,
+    ``https://s3.<region>.amazonaws.com/<bucket>/<key>``); query strings on URL
+    forms (presigned links, ``?versionId=``) are dropped.
+
+    An object key is NOT required — ``resolve_env`` gates every command, so
+    shape is enforced at point of use (upload). The key is preserved verbatim,
+    trailing slash included, except for percent-decoding of URL forms.
+
+    :raises ConfigError: empty value, unrecognizable http(s) host (e.g. an AWS
+        console page URL), or a bucket segment containing ``:`` (the
+        ``s3:/bucket`` one-slash typo).
+    """
+    original = value.strip()
+
+    def _bad() -> ConfigError:
+        msg = (
+            f"Cannot interpret {param} value '{original}' as an S3 location. "
+            "Accepted forms: bucket/key, s3://bucket/key, or an S3 endpoint "
+            "URL (https://<bucket>.s3.<region>.amazonaws.com/<key> or "
+            "https://s3.<region>.amazonaws.com/<bucket>/<key>)."
+        )
+        return ConfigError(msg + (f" {hint}" if hint else ""))
+
+    v = original
+    if not v:
+        raise _bad()
+    while v.lower().startswith("s3://"):
+        v = v[len("s3://") :]
+    if v.lower().startswith(("https://", "http://")):
+        parts = urlsplit(v)
+        host = parts.hostname or ""
+        path = unquote(parts.path)
+        if _S3_PATH_STYLE_HOST.match(host):
+            v = path.lstrip("/")
+        else:
+            m = _S3_VIRTUAL_HOST.match(host)
+            if not m:
+                raise _bad()
+            key = path.lstrip("/")
+            v = f"{m.group('bucket')}/{key}" if key else m.group("bucket")
+    bucket = v.split("/", 1)[0]
+    if not bucket or ":" in bucket:
+        raise _bad()
+    return v
 
 
 def resolve_env(env: str, project: Optional[str] = None) -> EnvConfig:
@@ -454,7 +525,9 @@ def resolve_env(env: str, project: Optional[str] = None) -> EnvConfig:
         dictionary_version=rc.app("dictionary_version"),
         aws_profile=profile,
         aws_secret_name=rc.app("aws_secret_name"),
-        schema_s3_uri=rc.app("schema_s3_uri"),
+        schema_s3_uri=normalize_s3_location(
+            rc.app("schema_s3_uri"), hint=_SCHEMA_S3_URI_HINT
+        ),
         domain=rc.app("domain"),
         app_name=rc.app("app_name"),
         namespace=rc.app("namespace"),

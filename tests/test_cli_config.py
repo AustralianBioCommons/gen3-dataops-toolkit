@@ -231,6 +231,57 @@ def test_resolve_env_undeployed_raises_deploy_hint():
 
 
 @mock_aws
+def test_resolve_env_normalizes_schema_s3_uri():
+    """Input: app/schema_s3_uri stored WITH its scheme ('s3://bucket/key').
+
+    Expected: EnvConfig and G3DT_SCHEMA_S3_URI carry the scheme-less form.
+
+    Why: deploy_dd.sh, full_deploy_dd_and_synth.sh, and dict_cmds.py all
+    prepend 's3://' themselves; a scheme-carrying SSM value used to produce
+    's3://s3://...' and crash boto3 with 'Invalid bucket name "s3:"'.
+    Normalizing at resolve time is the single point that fixes all three,
+    so this pins the value at the source AND at the script-env boundary.
+    """
+    _seed_env("etl", "staging")
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(
+        Name="/etl/staging/app/schema_s3_uri",
+        Value="s3://schema-bucket/schema_dev.json",
+        Type="String",
+        Overwrite=True,
+    )
+    e = config.resolve_env("staging")
+    assert e.schema_s3_uri == "schema-bucket/schema_dev.json"
+    assert (
+        config.script_env(e)["G3DT_SCHEMA_S3_URI"] == "schema-bucket/schema_dev.json"
+    )
+
+
+@mock_aws
+def test_resolve_env_rejects_unrecognizable_schema_s3_uri():
+    """Input: app/schema_s3_uri set to an AWS *console page* URL.
+
+    Expected: ConfigError at resolve time listing the accepted forms.
+
+    Why: a console URL is not an object location; passing it through would
+    fail later inside boto3 with a message that never mentions the config
+    key. Failing at resolve with guidance matches how missing app facts are
+    reported.
+    """
+    _seed_env("etl", "staging")
+    ssm = boto3.client("ssm", region_name=REGION)
+    ssm.put_parameter(
+        Name="/etl/staging/app/schema_s3_uri",
+        Value="https://ap-southeast-2.console.aws.amazon.com/s3/buckets/b?prefix=k",
+        Type="String",
+        Overwrite=True,
+    )
+    with pytest.raises(config.ConfigError) as exc:
+        config.resolve_env("staging")
+    assert "Accepted forms" in str(exc.value)
+
+
+@mock_aws
 def test_list_envs_reads_deployed_trees():
     """list_envs discovers envs from SSM paths, not from any local file."""
     _seed_env("etl", "staging")

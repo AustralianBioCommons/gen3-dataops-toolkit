@@ -4,6 +4,8 @@ import logging
 import sys
 from botocore.exceptions import ClientError
 
+from g3dt.config import ConfigError, normalize_s3_location
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -49,23 +51,26 @@ def upload_dict_to_s3(dict_file_path, s3_target_uri, dict_version, profile_name=
 
     Args:
         dict_file_path (str): Local dictionary path.
-        s3_target_uri (str): URI like s3://bucket/key.
+        s3_target_uri (str): Target like s3://bucket/key. Forgiving: bare
+            bucket/key, a doubled s3:// scheme, and S3 endpoint https URLs
+            are all accepted (see g3dt.config.normalize_s3_location).
         dict_version (str): Dictionary version string.
         profile_name (str, optional): AWS profile name.
 
     Returns:
         bool: True on success, False otherwise.
     """
-    if not s3_target_uri.startswith("s3://"):
-        logger.error(f"Invalid S3 URI: {s3_target_uri}")
+    try:
+        location = normalize_s3_location(s3_target_uri, param="s3_uri argument")
+    except ConfigError as e:
+        logger.error(str(e))
+        return False
+    if "/" not in location:
+        logger.error(f"S3 location missing an object key: {s3_target_uri}")
         return False
 
     try:
-        s3_path = s3_target_uri[len("s3://") :]
-        if "/" not in s3_path:
-            logger.error(f"S3 URI missing key: {s3_target_uri}")
-            return False
-        bucket, key = s3_path.split("/", 1)
+        bucket, key = location.split("/", 1)
         # Set S3 metadata key to "version" instead of "dict_version"
         extra_args = {"Metadata": {"version": dict_version or "unknown"}}
         s3_client = get_s3_client(profile_name)

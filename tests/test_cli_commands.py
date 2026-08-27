@@ -166,6 +166,27 @@ def test_dict_deploy_version_flag_overrides_the_declared_version(mock_run, _env)
     assert "SSM says v1" in result.output
 
 
+@patch("g3dt.cli.dict_cmds.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_dict_upload_composes_s3_uri_from_schemeless_config(mock_run, _env):
+    """
+    Inputs:  g3dt dict upload --env test, with schema_s3_uri 'u' (scheme-less)
+    Expected: upload_dictionary.py argv carries exactly 's3://u'
+
+    This pins the division of labour that caused the "s3://s3://..." incident:
+    EnvConfig.schema_s3_uri is contractually scheme-less (resolve_env
+    normalizes it — see test_cli_config.py) and it is the CALLERS that prepend
+    the single 's3://'. If this command ever received a scheme-carrying value,
+    the composed URI would double the scheme again.
+    """
+    result = runner.invoke(app, ["dict", "upload", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[0] == sys.executable
+    assert argv[1].endswith("services/dictionary/upload_dictionary.py")
+    assert argv[3] == "s3://u"
+
+
 @patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
 @patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
 @patch("g3dt.cli._internal.runner.run")
