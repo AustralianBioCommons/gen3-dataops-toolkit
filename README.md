@@ -160,6 +160,20 @@ version until the CDK config catches up —
 `g3dt config diff --env <env> --file <wrapper>/config/<project>.<env>.json`
 reports exactly that gap and exits 1, so it can gate CI.
 
+### Deleting metadata: where the node order comes from
+
+`delete metadata` walks nodes children-before-parents. The order is resolved
+from the first available of: an explicit `--import-order <path|s3://…>`
+(failures are fatal — an explicit source is never silently skipped), the
+registered study's release bucket (`DataImportOrder.txt` next to the release's
+node JSONs), a `DataImportOrder.txt` in the current directory, or a
+topological sort derived from the dictionary itself — the `--dict-version`
+tag's bundle when given (downloaded to `~/.g3dt/schemas` if needed), else the
+env's deployed dictionary. Deriving matters when deleting data submitted
+under an older dictionary whose node layout differs from today's: pass
+`--dict-version <old-tag>`. With `--on ec2`, `--import-order` must be an
+`s3://` URI (a laptop path does not exist on the box).
+
 Synthetic data is only schema-valid against the dictionary that generated it, so
 `synth generate` records the dictionary version in each batch and `synth upload`
 refuses a batch that doesn't match the version being uploaded (override with

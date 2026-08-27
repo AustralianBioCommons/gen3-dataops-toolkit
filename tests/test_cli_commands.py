@@ -719,6 +719,71 @@ def test_delete_metadata_program_id_without_synthetic_is_usage_error(
     assert "--synthetic" in result.output
 
 
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_forwards_import_order_and_dict_version(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        The workers resolve the node order themselves (release bucket, cwd,
+        or derived from the dictionary) — the CLI's only job is to forward
+        the operator's source overrides verbatim to the wrapper script.
+
+    Inputs:  --import-order in one run, --dict-version in another
+    Expected: each token pair appears in the wrapper argv; neither appears
+    when not passed (older installed scripts hard-error on unknown flags).
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab", "--env", "staging",
+         "--version", "0.9.8", "--yes",
+         "--import-order", "s3://b/DataImportOrder.txt"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[argv.index("--import-order") + 1] == "s3://b/DataImportOrder.txt"
+    assert "--dict-version" not in argv
+
+    mock_run.reset_mock()
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab", "--env", "staging",
+         "--version", "0.9.8", "--yes", "--dict-version", "v1.3.0"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[argv.index("--dict-version") + 1] == "v1.3.0"
+    assert "--import-order" not in argv
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.delete_cmds.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_delete_metadata_import_order_with_dict_version_is_usage_error(
+    mock_run, _study, _env
+):
+    """
+    Background:
+        --import-order names the exact order file; --dict-version derives
+        one. Together they contradict — silently preferring either would hide
+        an operator mistake in the middle of a destructive command.
+
+    Inputs:  both flags on one invocation
+    Expected: exit 2, nothing dispatched.
+    """
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab", "--env", "staging",
+         "--version", "0.9.8", "--yes",
+         "--import-order", "order.txt", "--dict-version", "v1.3.0"],
+    )
+    assert result.exit_code == 2
+    mock_run.assert_not_called()
+    assert "only one" in result.output
+
+
 @patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
 @patch("g3dt.cli._internal.runner.run")
 def test_k8s_restart_schema_passes_env_argo_args(mock_run, _env):

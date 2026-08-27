@@ -24,6 +24,11 @@ Arguments:
   --synthetic  (optional) Registry-free synthetic-data mode: each study name is
                the Gen3 project code itself (no SSM study registry lookup)
   --program-id (optional) Gen3 program for --synthetic mode (default program1)
+  --import-order (optional) Path or s3:// URI of DataImportOrder.txt. Default:
+               auto — the study's release bucket (registered studies), then
+               ./DataImportOrder.txt, then derived from the dictionary
+  --dict-version (optional) Dictionary git tag to derive the node order from
+               (default: the env's deployed dictionary)
 
 Behaviour:
   * version 'all'          -> delete_all_metadata_for_project.py (deletes whole nodes)
@@ -52,6 +57,8 @@ VERSION=""
 NODE=""
 SYNTHETIC=0
 PROGRAM_ID="program1"
+IMPORT_ORDER=""
+DICT_VERSION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +84,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --program-id)
             PROGRAM_ID="$2"
+            shift 2
+            ;;
+        --import-order)
+            IMPORT_ORDER="$2"
+            shift 2
+            ;;
+        --dict-version)
+            DICT_VERSION="$2"
             shift 2
             ;;
         *)
@@ -157,17 +172,17 @@ for i in "${!STUDY_NAMES[@]}"; do
         CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_all_metadata_for_project.py"
              --study "$study" --env "$ENV")
         [[ $SYNTHETIC -eq 1 ]] && CMD+=(--synthetic --program-id "$PROGRAM_ID")
-        [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     elif [[ $SYNTHETIC -eq 1 ]]; then
         CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_synth_metadata_by_version.py"
              --study "$study" --env "$ENV" --version "$study_version"
              --program-id "$PROGRAM_ID" --skip-if-empty)
-        [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     else
         CMD=("${G3DT_PYTHON:-python3}" "${SCRIPT_DIR}/delete_metadata_by_guid.py"
              --study "$study" --env "$ENV" --version "$study_version" --skip-if-empty)
-        [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
     fi
+    [[ -n "$NODE" ]] && CMD+=(--node "$NODE")
+    [[ -n "$IMPORT_ORDER" ]] && CMD+=(--import-order "$IMPORT_ORDER")
+    [[ -n "$DICT_VERSION" ]] && CMD+=(--dict-version "$DICT_VERSION")
 
     # Run the worker without aborting the loop on a non-zero exit.
     set +e

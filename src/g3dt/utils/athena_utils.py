@@ -13,7 +13,6 @@ import pytz
 import base64
 import numpy as np
 from decimal import Decimal
-from gen3_validator.dict import DataDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -915,14 +914,6 @@ def write_gold_json_to_s3(
     s3.put_object(Body=json_data, Bucket=s3_bucket, Key=s3_object_key)
     logger.info(f"Object created at s3://{s3_bucket}/{s3_object_key}")
 
-
-def construct_data_import_order(s3_uri) -> list:
-    from g3dt.validate.validate import load_schema_from_s3_uri
-    schema_dict = load_schema_from_s3_uri(s3_uri)
-    dd = DataDictionary(schema_dict)
-    dd.schema = schema_dict
-    dd.calculate_node_order()
-    return dd.node_order
 
 def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_data,
                               s3_client=None, key_prefix="release_jsons"):

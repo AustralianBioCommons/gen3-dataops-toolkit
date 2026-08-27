@@ -26,6 +26,11 @@ from g3dt.upload.metadata_submitter import (
     create_gen3_submission_class,
 )
 from g3dt.upload.metadata_deleter import delete_node_records_by_property
+from g3dt.import_order import (
+    ImportOrderError,
+    resolve_import_order,
+    to_deletion_order,
+)
 
 # ANSI colour codes (matching metadata_submitter.py style)
 GREEN = "\033[92m"
@@ -62,20 +67,6 @@ def setup_logger():
 
 # Shared config resolution (SSM-backed) — see src/g3dt/config.py
 from g3dt import config as g3dt_config  # noqa: E402
-
-
-def load_import_order(import_order_path, exclude_nodes=None):
-    """
-    Reads the DataImportOrder.txt file and returns the node list
-    in deletion order (reversed, with excluded nodes removed).
-    """
-    if exclude_nodes is None:
-        exclude_nodes = EXCLUDE_NODES
-    with open(import_order_path, 'r', encoding='utf-8') as f:
-        nodes = [line.strip() for line in f if line.strip()]
-    nodes = [n for n in nodes if n not in exclude_nodes]
-    nodes.reverse()
-    return nodes
 
 
 def main():
@@ -116,8 +107,21 @@ def main():
     )
     parser.add_argument(
         "--import-order",
-        default="DataImportOrder.txt",
-        help="Path to DataImportOrder.txt",
+        default=None,
+        help=(
+            "Path or s3:// URI of DataImportOrder.txt. Default: auto "
+            "(./DataImportOrder.txt, then derived from the dictionary — "
+            "synthetic projects have no release bucket)."
+        ),
+    )
+    parser.add_argument(
+        "--dict-version",
+        default=None,
+        help=(
+            "Dictionary git tag to derive the node order from (verbatim, "
+            "e.g. v1.3.0). Default: the env's deployed dictionary. Only "
+            "used when the order is derived."
+        ),
     )
     parser.add_argument(
         "--node",
@@ -171,6 +175,12 @@ def main():
 
     args = parser.parse_args()
 
+    if args.import_order and args.dict_version:
+        parser.error(
+            "--import-order names the exact file; --dict-version derives one "
+            "— pass only one."
+        )
+
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
@@ -215,12 +225,23 @@ def main():
             BLUE, RESET, args.node,
         )
     else:
-        nodes_to_delete = load_import_order(args.import_order)
+        try:
+            nodes, source = resolve_import_order(
+                env_cfg=env_cfg,
+                session=session,
+                import_order=args.import_order,
+                dict_version=args.dict_version,
+                study_cfg=None,  # synthetic projects are never registered
+            )
+        except ImportOrderError as exc:
+            logger.error(str(exc))
+            sys.exit(1)
+        nodes_to_delete = to_deletion_order(nodes, EXCLUDE_NODES)
         logger.info(
-            "Loaded %s nodes from %s (deletion order, "
+            "Import order source: %s (%s nodes, deletion order, "
             "excluding %s)",
+            source,
             len(nodes_to_delete),
-            args.import_order,
             EXCLUDE_NODES,
         )
 

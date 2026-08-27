@@ -286,3 +286,51 @@ def test_synthetic_skip_exit_code_counts_as_skip(stub_python):
     assert result.returncode == 0
     assert "Deleted       : 1" in result.stdout
     assert "Skipped       : 1" in result.stdout
+
+
+def test_import_order_and_dict_version_forward_to_every_worker(stub_python):
+    """
+    Background:
+        The workers resolve the node order themselves, so a flag forwarded to
+        two routing branches but not the third would silently revert that
+        branch to its own defaults — a different order source mid-batch.
+        All three worker branches must receive both flags.
+
+    Inputs:  three studies hitting all three branches (all, Athena-version,
+             synthetic-version is exercised in a second run), with
+             --import-order and --dict-version... (mutually exclusive at the
+             CLI, but the shell forwards whatever it is given — one per run).
+    Expected Output: every recorded worker argv carries the flag.
+    """
+    env, record = stub_python
+
+    _run(env, "--studies", "a_staging:all,b_staging:0.9.8", "--env", "staging",
+         "--import-order", "s3://b/DataImportOrder.txt")
+    _run(env, "--studies", "s1:all,s2:v1.3.0", "--env", "test", "--synthetic",
+         "--dict-version", "v1.3.0")
+
+    calls = record.read_text().strip().splitlines()
+    assert len(calls) == 4
+    for call in calls[:2]:
+        assert "--import-order s3://b/DataImportOrder.txt" in call
+    for call in calls[2:]:
+        assert "--dict-version v1.3.0" in call
+
+
+def test_flags_absent_by_default_keeps_legacy_argv(stub_python):
+    """
+    Background:
+        The CLI emits the new tokens only when the operator passed them, so a
+        default run stays byte-compatible with an OLDER installed service
+        script on a lagging box (which would hard-error on unknown flags).
+
+    Inputs:  a plain run with neither new flag
+    Expected Output: worker argv contains neither token.
+    """
+    env, record = stub_python
+
+    _run(env, "--studies", "a_staging:0.9.8", "--env", "staging")
+
+    call = record.read_text().strip()
+    assert "--import-order" not in call
+    assert "--dict-version" not in call

@@ -227,6 +227,81 @@ def test_delete_metadata_synthetic_on_ec2_forwards_flags(mock_session, mock_reco
 
 
 @mock_aws
+@patch("g3dt.cli._internal.registry.record")
+@patch("g3dt.cli._internal.dispatch.create_boto3_session")
+def test_delete_metadata_on_ec2_rejects_local_import_order_path(
+    mock_session, mock_record
+):
+    """
+    Background:
+        The EC2 re-entry resolves --import-order against the BOX's
+        filesystem. A laptop path forwarded verbatim is at best a crash after
+        the operator already confirmed, at worst a same-named DIFFERENT file
+        silently ordering the delete — the exact wrong-file class this
+        feature removes. Local paths are rejected pre-confirmation,
+        pre-dispatch; s3:// URIs resolve identically anywhere and pass.
+
+    Inputs:  --on ec2 with a local --import-order path
+    Expected: exit 2, no SSM command sent.
+    """
+    _seed_env()
+    ssm = MagicMock()
+    session = MagicMock()
+    session.client.return_value = ssm
+    mock_session.return_value = session
+
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab", "--env", "staging",
+         "--version", "0.9.8", "--on", "ec2", "--yes",
+         "--import-order", "/Users/me/DataImportOrder.txt"],
+    )
+    assert result.exit_code == 2
+    ssm.send_command.assert_not_called()
+    assert "s3://" in result.output
+
+
+@mock_aws
+@patch("g3dt.cli._internal.registry.record")
+@patch("g3dt.cli._internal.dispatch.create_boto3_session")
+def test_delete_metadata_on_ec2_forwards_s3_import_order_and_dict_version(
+    mock_session, mock_record
+):
+    """
+    Inputs:  --on ec2 with an s3:// --import-order (and, in a second run,
+             --dict-version)
+    Expected: the remote command carries the flag — both resolve identically
+    on the box, so they may travel.
+    """
+    _seed_env()
+    ssm = MagicMock()
+    ssm.send_command.return_value = {"Command": {"CommandId": "cmd-io"}}
+    session = MagicMock()
+    session.client.return_value = ssm
+    mock_session.return_value = session
+
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab", "--env", "staging",
+         "--version", "0.9.8", "--on", "ec2", "--yes",
+         "--import-order", "s3://b/DataImportOrder.txt"],
+    )
+    assert result.exit_code == 0, result.output
+    command = ssm.send_command.call_args.kwargs["Parameters"]["commands"][0]
+    assert "--import-order s3://b/DataImportOrder.txt" in command
+
+    result = runner.invoke(
+        app,
+        ["delete", "metadata", "--studies", "ausdiab", "--env", "staging",
+         "--version", "0.9.8", "--on", "ec2", "--yes",
+         "--dict-version", "v1.3.0"],
+    )
+    assert result.exit_code == 0, result.output
+    command = ssm.send_command.call_args.kwargs["Parameters"]["commands"][0]
+    assert "--dict-version v1.3.0" in command
+
+
+@mock_aws
 @patch("g3dt.cli._internal.dispatch.create_boto3_session")
 def test_on_ec2_without_instance_id_errors(mock_session):
     """

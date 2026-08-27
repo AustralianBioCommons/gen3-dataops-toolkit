@@ -14,6 +14,12 @@ synthetic projects are never registered), bare names default to version
 ``data_version`` property via GraphQL rather than Athena receipts (synthetic
 uploads write none).
 
+The node deletion order comes from, in order: an explicit ``--import-order``
+(path or s3:// URI; failures are fatal, never silently skipped), the
+registered study's release bucket, a ``DataImportOrder.txt`` in the current
+directory, or a topological sort derived from the dictionary itself — the
+``--dict-version`` bundle when given, else the env's deployed dictionary.
+
 Every command confirms before acting. Production always requires typing the
 target id, even with ``--yes``. Deleting ALL versions always prompts, even with
 ``--yes``. Confirmation happens locally before any EC2 dispatch (SSM has no
@@ -186,6 +192,21 @@ def metadata(
         help="Gen3 program for --synthetic (default: program1). "
              "Invalid without --synthetic.",
     ),
+    import_order: Optional[str] = typer.Option(
+        None,
+        "--import-order",
+        help="Path or s3:// URI of DataImportOrder.txt. Default: auto — the "
+             "study's release bucket (registered studies), then "
+             "./DataImportOrder.txt, then derived from the dictionary. "
+             "With --on ec2 only s3:// URIs are accepted.",
+    ),
+    dict_version: Optional[str] = typer.Option(
+        None,
+        "--dict-version",
+        help="Dictionary git tag to derive the node order from (verbatim, "
+             "e.g. v1.3.0). Default: the env's deployed dictionary. Only "
+             "used when the order is derived.",
+    ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the non-prod prompt (specific-version only)."
     ),
@@ -208,6 +229,26 @@ def metadata(
         typer.secho(
             "--program-id is only valid with --synthetic (registered studies "
             "carry their program in the study registry).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    if import_order and dict_version:
+        typer.secho(
+            "--import-order names the exact file; --dict-version derives one "
+            "— pass only one.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    # A laptop path forwarded to the EC2 box would resolve against the box's
+    # filesystem — at best a crash after confirmation, at worst a same-named
+    # DIFFERENT file ordering the delete. s3:// URIs (and --dict-version)
+    # resolve identically anywhere, so only those may travel.
+    if on == Target.ec2 and import_order and not import_order.startswith("s3://"):
+        typer.secho(
+            "--import-order with --on ec2 must be an s3:// URI (a local path "
+            "does not exist on the box). Upload the file, or run locally.",
             fg=typer.colors.RED,
             err=True,
         )
@@ -266,6 +307,10 @@ def metadata(
             # optional on the wire, but an explicit value keeps the contract
             # visible in logs and SSM command history.
             a += ["--synthetic", "--program-id", program_id or "program1"]
+        if import_order:
+            a += ["--import-order", import_order]
+        if dict_version:
+            a += ["--dict-version", dict_version]
         return a
 
     def remote_cli(env_name):
@@ -284,6 +329,11 @@ def metadata(
             a.append("--synthetic")
             if program_id is not None:
                 a += ["--program-id", program_id]
+        if import_order:
+            # Guaranteed s3:// by the pre-dispatch gate above.
+            a += ["--import-order", import_order]
+        if dict_version:
+            a += ["--dict-version", dict_version]
         return a
 
     dispatch.run_or_dispatch(

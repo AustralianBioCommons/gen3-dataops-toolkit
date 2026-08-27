@@ -957,3 +957,158 @@ def test_delete_all_worker_synthetic_mode_uses_raw_study_as_project(monkeypatch)
 
     assert captured["project_id"] == "synthetic_dataset_1"
     assert captured["program_id"] == "p2"
+
+
+# ==========================================
+# Worker scripts — import-order resolution (no more CWD crash)
+# ==========================================
+#
+# Historically every worker defaulted --import-order to 'DataImportOrder.txt'
+# in the CWD and crashed with FileNotFoundError anywhere else. The node order
+# now comes from g3dt.import_order.resolve_import_order (explicit flag ->
+# release bucket -> cwd -> derive from the dictionary); these tests patch that
+# resolver on each loaded worker module and pin the regression plus the
+# study_cfg wiring that makes the release-bucket step reachable (or not).
+
+
+def _resolver_stub(calls, nodes=("project", "subject", "lab_result")):
+    def _resolve(**kwargs):
+        calls.append(kwargs)
+        return list(nodes), "stub source"
+    return _resolve
+
+
+def test_delete_all_worker_without_cwd_file_resolves_order(monkeypatch, tmp_path):
+    """THE regression: no cwd file, no --node -> resolver runs, no crash.
+
+    The original failure: `g3dt delete metadata ... --synthetic` (bare names
+    -> version all) crashed with FileNotFoundError('DataImportOrder.txt')
+    because the operator's shell was not in a directory holding that file.
+    In --synthetic mode the resolver must receive study_cfg=None (registry-
+    free), and the resolved submission order must be filtered + reversed.
+    """
+    mod = _load_script(_ALL_WORKER_PATH, "delete_all_worker_order_regression")
+    from g3dt.config import EnvConfig
+
+    env_cfg = EnvConfig(
+        name="test", is_ec2=False, region="ap-southeast-2",
+        dictionary_version="v1", aws_profile=None, aws_secret_name="sec",
+        schema_s3_uri="u", domain="d", app_name="a", namespace="n",
+        cluster_name="c", schema_repo="Org/schema-repo",
+    )
+    monkeypatch.setattr(mod.g3dt_config, "resolve_env", lambda *a, **k: env_cfg)
+    monkeypatch.setattr(mod, "create_boto3_session", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        mod, "get_gen3_api_key_aws_secret", lambda *a, **k: {"api_key": "jwt"}
+    )
+    monkeypatch.setattr(
+        mod, "create_gen3_submission_class", lambda *a, **k: MagicMock()
+    )
+    captured = {}
+    monkeypatch.setattr(
+        mod, "delete_project_metadata", lambda **k: captured.update(k)
+    )
+    calls = []
+    monkeypatch.setattr(mod, "resolve_import_order", _resolver_stub(calls))
+    monkeypatch.chdir(tmp_path)  # guaranteed: no DataImportOrder.txt here
+    monkeypatch.setattr(sys, "argv", [
+        "delete_all_metadata_for_project.py", "--study", "synthetic_dataset_1",
+        "--env", "test", "--synthetic",
+    ])
+
+    mod.main()  # must not raise FileNotFoundError
+
+    assert calls[0]["study_cfg"] is None  # registry-free mode
+    # 'project' filtered by EXCLUDE_NODES, remainder reversed.
+    assert captured["nodes"] == ["lab_result", "subject"]
+
+
+def test_guid_worker_passes_study_cfg_to_resolver(monkeypatch, tmp_path):
+    """The registered-study worker hands its StudyConfig to the resolver.
+
+    That is what makes the release-bucket step reachable: without it, the
+    resolver could never find the DataImportOrder.txt the release ships.
+    """
+    import pandas as pd
+
+    mod = _load_worker()
+    from g3dt.config import EnvConfig, StudyConfig
+
+    env_cfg = EnvConfig(
+        name="staging", is_ec2=False, region="ap-southeast-2",
+        dictionary_version="v1", aws_profile=None, aws_secret_name="sec",
+        schema_s3_uri="u", domain="d", app_name="a", namespace="n",
+        cluster_name="c", schema_repo="Org/schema-repo",
+    )
+    study_cfg = StudyConfig(
+        key="ausdiab_staging", project_id="AusDiab", program_id="program1",
+        s3_metadata_path="s3://b/staging/ausdiab/",
+    )
+    rc = MagicMock()
+    rc.metadata_db = "db"
+    rc.athena_output_location = "s3://o/"
+    rc.athena_workgroup = "primary"
+    monkeypatch.setattr(mod.g3dt_config, "resolve_env", lambda *a, **k: env_cfg)
+    monkeypatch.setattr(mod.g3dt_config, "resolve_study", lambda *a, **k: study_cfg)
+    monkeypatch.setattr(mod.g3dt_config, "require_project", lambda *a, **k: "etl")
+    monkeypatch.setattr(mod.resolver, "resolve", lambda *a, **k: rc)
+    monkeypatch.setattr(mod, "create_boto3_session", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        mod, "get_gen3_api_key_aws_secret", lambda *a, **k: {"api_key": "jwt"}
+    )
+    monkeypatch.setattr(
+        mod, "infer_api_endpoint_from_jwt", lambda *a, **k: "https://api"
+    )
+    monkeypatch.setattr(
+        mod, "create_gen3_submission_class", lambda *a, **k: MagicMock()
+    )
+    monkeypatch.setattr(
+        mod, "query_metadata_upload_guids", lambda *a, **k: pd.DataFrame()
+    )
+    calls = []
+    monkeypatch.setattr(mod, "resolve_import_order", _resolver_stub(calls))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "delete_metadata_by_guid.py", "--study", "ausdiab", "--env", "staging",
+        "--version", "9.9.9",
+    ])
+
+    mod.main()  # empty Athena results -> completes with the not-found warning
+
+    assert calls[0]["study_cfg"] is study_cfg
+
+
+def test_synth_version_worker_resolves_order_registry_free(monkeypatch, tmp_path):
+    """The synthetic version worker resolves with study_cfg=None, no crash."""
+    mod = _load_script(_SYNTH_WORKER_PATH, "synth_worker_order_regression")
+    _stub_synth_worker_env(mod, monkeypatch)
+    monkeypatch.setattr(
+        mod, "delete_node_records_by_property", lambda **k: 1
+    )
+    calls = []
+    monkeypatch.setattr(mod, "resolve_import_order", _resolver_stub(calls))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "delete_synth_metadata_by_version.py", "--study", "s1",
+        "--env", "test", "--version", "v1.3.0",
+    ])
+
+    mod.main()
+
+    assert calls[0]["study_cfg"] is None
+
+
+def test_worker_rejects_import_order_with_dict_version(monkeypatch, tmp_path):
+    """--import-order and --dict-version together is a usage error (exit 2).
+
+    They name contradictory sources for a destructive run; picking one
+    silently would hide an operator mistake.
+    """
+    mod = _load_script(_ALL_WORKER_PATH, "delete_all_worker_flag_conflict")
+    monkeypatch.setattr(sys, "argv", [
+        "delete_all_metadata_for_project.py", "--study", "s", "--env", "test",
+        "--import-order", str(tmp_path / "o.txt"), "--dict-version", "v1.0.0",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2
