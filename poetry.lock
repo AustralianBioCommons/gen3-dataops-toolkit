@@ -1519,14 +1519,14 @@ requests = ">=2.32.4,<3.0.0"
 
 [[package]]
 name = "gen3-metadata-simulator"
-version = "0.3.0"
+version = "0.5.3"
 description = "Simulate linked Gen3 metadata JSON files from a bundled Gen3 JSON schema"
 optional = false
 python-versions = "<4.0,>=3.9.5"
 groups = ["synth"]
 files = [
-    {file = "gen3_metadata_simulator-0.3.0-py3-none-any.whl", hash = "sha256:3a005dd96430593083668f3fe44906bb9effb90de4bfcf07383942ae1b782e4e"},
-    {file = "gen3_metadata_simulator-0.3.0.tar.gz", hash = "sha256:a2a5fd5bc4f29d644ab4e71190bdd9f1e5acdda885a6a84feb7f2607ca9af557"},
+    {file = "gen3_metadata_simulator-0.5.3-py3-none-any.whl", hash = "sha256:8191efa0fff020ffcd3a7a0c99080248fdf708b1b48e0d272d8898ca1a8c3a71"},
+    {file = "gen3_metadata_simulator-0.5.3.tar.gz", hash = "sha256:329792abc5b7c2fe7a725407c288b9201c1dafcb40035031a12da70938bf21f8"},
 ]
 
 [package.dependencies]
@@ -4804,4 +4804,4 @@ type = ["pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9.5,<4.0.0"
-content-hash = "d9cef08d1c318b649f7270adb57fbe577185b1a6b87a80cfd4650dfb13dd2051"
+content-hash = "c4569e15c315f89002d84c441627bb781e3515a2ad46f38b88d28f76194c35be"

@@ -44,7 +44,7 @@ moto = ">=5.0"
 optional = true
 
 [tool.poetry.group.synth.dependencies]
-gen3-metadata-simulator = "^0.3.0"
+gen3-metadata-simulator = "^0.5.3"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
