@@ -35,7 +35,9 @@ def register(
     env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     dry_run: bool = typer.Option(
         False, "--dry-run", "-d",
-        help="Scan + write file_metadata only; skip indexd."
+        help="Scan the prefixes and record what was found in the warehouse's "
+        "file_metadata table, but register NOTHING with indexd. Note this "
+        "still writes that table (unlike --dry-run elsewhere in g3dt)."
     ),
     force: bool = typer.Option(
         False, "--force",

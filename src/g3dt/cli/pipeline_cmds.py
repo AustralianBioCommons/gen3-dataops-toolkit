@@ -57,10 +57,17 @@ def status(
     which: Pipeline = typer.Option(
         Pipeline.writeReleaseInfo,
         "--which",
-        help="Which CodePipeline to inspect.",
+        help="Which CodePipeline to inspect: writeReleaseInfo (the data-v* "
+        "release pipeline, whose build step is the dbtReleaseBuilder project "
+        "`pipeline logs` reads) or dbtTestAndRun (branch-push CI).",
     ),
 ) -> None:
-    """Show the latest execution state per stage of the pipeline."""
+    """Show the latest execution state per stage of the pipeline.
+
+    Examples:
+      g3dt pipeline status --env staging
+      g3dt pipeline status --env staging --which dbtTestAndRun
+    """
     which = which.value
     env = resolve.active_env(env)
     try:
@@ -90,9 +97,14 @@ def logs(
     which: Build = typer.Option(
         Build.dbtReleaseBuilder,
         "--which",
-        help="Which CodeBuild project's logs to read.",
+        help="Which CodeBuild project's logs to read: dbtReleaseBuilder (the "
+        "build inside the writeReleaseInfo pipeline `pipeline status` shows) "
+        "or dbtTestAndRun (branch-push CI).",
     ),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Tail until the build ends."),
+    follow: bool = typer.Option(
+        False, "--follow", "-f",
+        help="Stream new output as it arrives, until the build ends.",
+    ),
     poll_seconds: int = typer.Option(5, "--poll-seconds", help="Follow poll interval."),
 ) -> None:
     """Print (and optionally follow) the latest build's CloudWatch output.
@@ -100,6 +112,10 @@ def logs(
     The log group is CodeBuild's default ``/aws/codebuild/<project>``; the
     project name comes from SSM ``codebuild/*``. The follow loop is the same
     filter_log_events + de-dup pattern as `g3dt jobs logs`.
+
+    Examples:
+      g3dt pipeline logs --env staging --follow
+      g3dt pipeline logs --env staging --which dbtTestAndRun
     """
     which = which.value
     env = resolve.active_env(env)

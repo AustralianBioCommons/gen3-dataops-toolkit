@@ -3,7 +3,7 @@
 Operate Gen3 AWS data-pipeline environments from one pip-installable CLI.
 
 `g3dt` is the tooling half of the Gen3 DataOps platform: the
-[gen3-aws-data-pipeline](https://github.com/AustralianBioCommons/gen3-aws-data-pipeline)
+[aws-gen3-pipeline](https://github.com/AustralianBioCommons/aws-gen3-pipeline)
 CDK app deploys a complete pipeline per project/environment and publishes every
 resource name to AWS SSM Parameter Store; `g3dt` resolves those names at
 runtime and gives operators one command surface for dictionary deploys,
@@ -19,8 +19,14 @@ operates any project: it is targeted by a **context** — a named
 ## Install
 
 ```bash
-pip install gen3-dataops-toolkit
+pipx install gen3-dataops-toolkit        # a CLI in its own venv (recommended)
+pip install gen3-dataops-toolkit         # or into an environment you manage
 ```
+
+Synthetic-data generation needs the simulator too: `g3dt synth
+install-simulator` installs it into whichever environment owns `g3dt`
+(for pipx that is `pipx inject gen3-dataops-toolkit gen3-metadata-simulator`).
+`g3dt --version` reports the installed toolkit version.
 
 ## Bootstrap: discover, then use
 
@@ -77,7 +83,7 @@ CodeBuild's `g3dt config dbt-env --env $ENV` contract is unchanged.)
 There are exactly two kinds of configuration:
 
 - **INPUTS** — human-authored values, committed as
-  `config/<projectId>.<env>.json` in the CDK repo and read only by
+  `config/<project>.<env>.json` in the deployment wrapper repo and read only by
   `cdk deploy`. To change what an environment *declares*, edit that file and
   redeploy — the value flows to SSM.
 - **OUTPUTS** — every resource name the CDK creates plus the mirrored Gen3

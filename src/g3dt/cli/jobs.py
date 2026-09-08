@@ -7,7 +7,15 @@ import typer
 
 from g3dt.cli._internal import dispatch, registry, resolve
 
-app = typer.Typer(no_args_is_help=True, help="Track EC2-dispatched jobs.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Track EC2-dispatched jobs.\n\n"
+    "Every `--on ec2` dispatch (metadata upload / upload-all, delete "
+    "metadata, indexd register) prints a run id and records it in this "
+    "laptop's ~/.g3dt/runs.json; these commands read that file and the "
+    "run's SSM Run Command status / CloudWatch logs. No --env: the run id "
+    "already names its environment.",
+)
 
 
 def _status_color(state: str) -> str:
@@ -79,9 +87,21 @@ def stop(run_id: str = typer.Argument(..., help="Run id from dispatch.")) -> Non
 
 @app.command()
 def logs(
-    run_id: str = typer.Argument(..., help="Run id from dispatch."),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Stream new output as it arrives."),
+    run_id: str = typer.Argument(
+        ..., help="Run id printed by the --on ec2 dispatch (see `g3dt jobs list`)."
+    ),
+    follow: bool = typer.Option(
+        False, "--follow", "-f",
+        help="Stream new output as it arrives, until the run ends.",
+    ),
 ) -> None:
-    """Print (and optionally follow) the CloudWatch logs for a dispatched run."""
+    """Print (and optionally follow) the CloudWatch logs for a dispatched run.
+
+    Empty output in the first minute is normal: the log stream is created
+    when the box starts writing.
+
+    Examples:
+      g3dt jobs logs 20260908T093000-metadata-upload --follow
+    """
     resolve.announce_context()
     dispatch.logs(run_id, follow=follow)

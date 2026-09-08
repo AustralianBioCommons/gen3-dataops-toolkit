@@ -26,7 +26,16 @@ from g3dt.cli._internal import resolve, runner, safety
 from g3dt.cli._internal.resolve import env_of
 from g3dt.cli._internal.helptext import ENV_OPT
 
-app = typer.Typer(no_args_is_help=True, help="ArgoCD / Kubernetes restarts (local).")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Restart the commons' Gen3 services / run its ETL via ArgoCD "
+    "(laptop only: needs the browser SSO login).",
+)
+
+LAPTOP_NOTE = (
+    "Requires an interactive ArgoCD SSO login (a browser opens), so it runs "
+    "on your laptop only — never on EC2."
+)
 
 _SCHEMA = "services/k8s_ops/argocd_restart_schema.sh"
 _ETL = "services/k8s_ops/argocd_restart_etl.sh"
@@ -74,6 +83,16 @@ def restart_schema(
 ) -> None:
     """Restart the schema microservices, in the env's configured order.
 
+    Each deployment is restarted in turn and polled until ArgoCD reports it
+    Healthy before the next starts. Use it after a dictionary upload (the
+    services re-read the schema at startup) or to roll guppy/portal after an
+    ETL. Requires an interactive ArgoCD SSO login (a browser opens), so it
+    runs on your laptop only — never on EC2.
+
+    Examples:
+      g3dt k8s restart-schema --env staging
+      g3dt k8s restart-schema --env staging --restart-services guppy-deployment,portal-deployment
+
     Targeting production requires typing the context/env name to confirm.
     """
     env = resolve.active_env(env)
@@ -96,7 +115,17 @@ def restart_etl(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
 ) -> None:
-    """Create + run the ETL cronjob and wait for completion.
+    """Run the ETL (create a Job from the cronjob) and wait for completion.
+
+    Refreshes your kubeconfig, creates a Job from the env's ETL cronjob, polls
+    it, then greps the tube container log for "Exit code: 0" — the pod can
+    report Failed and still have succeeded. Run it after a metadata upload
+    so the portal shows the new data. Requires an interactive ArgoCD SSO
+    login (a browser opens), so it runs on your laptop only — never on EC2.
+
+    Examples:
+      g3dt k8s restart-etl --env staging
+      g3dt k8s restart-etl --env staging --sync    # the app is behind the merged revision
 
     Targeting production requires typing the context/env name to confirm.
     """
@@ -127,7 +156,13 @@ def restart_ms(
 
     The ETL runs first (--etl-cronjob), then the services restart serially in
     the configured order (--restart-services). Nothing is synced in ArgoCD
-    unless --sync is given.
+    unless --sync is given. Requires an interactive ArgoCD SSO login (a
+    browser opens, twice — once per wrapped step), so it runs on your laptop
+    only — never on EC2.
+
+    Examples:
+      g3dt k8s restart-ms --env staging
+      g3dt k8s restart-ms --env staging --restart-services guppy-deployment
 
     Targeting production requires typing the context/env name to confirm —
     this restarts every Gen3 microservice in the target commons.

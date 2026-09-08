@@ -176,6 +176,12 @@ def add(
 
     The path is not checked against S3 here (release prefixes are often
     created later) — ``study show`` and ``study repoint`` validate it.
+
+    Example:
+      g3dt study add cdah --project-id CAUGHT-CAD --program-id program1 \\
+          --path s3://my-gold/release_jsons/v2.0.0/cdah/ --env staging
+
+    Targeting production requires typing the context/env name to confirm.
     """
     env = resolve.active_env(env)
     try:
@@ -381,9 +387,18 @@ def repoint(
 ) -> None:
     """Point studies' metadata paths at a release — the release-cutover step.
 
-    Every target prefix is validated (DataImportOrder.txt + node JSONs — the
-    exact checks upload performs) BEFORE anything is written: one bad target
-    means nothing changes.
+    Pass exactly one of --release <tag> or --latest. Every target prefix is
+    validated (DataImportOrder.txt + node JSONs — the exact checks upload
+    performs) BEFORE anything is written: one bad target means nothing
+    changes. To upload one release without moving the registry, use
+    `g3dt metadata upload --release <tag>` instead.
+
+    Examples:
+      g3dt study repoint --latest --env staging --dry-run
+      g3dt study repoint --release v2.1.0 --env staging
+      g3dt study repoint --release v2.1.0 --studies cdah,edcad --env staging
+
+    Targeting production requires typing the context/env name to confirm.
     """
     if bool(release) == latest:
         _usage("Pass exactly one of --release <tag> or --latest.")
@@ -507,7 +522,10 @@ def migrate(
     Idempotent: entries already in SSM and identical are skipped; a rerun
     after success reports "already migrated". Differing records are refused
     without --force. The file is renamed to studies.yaml.migrated only after
-    every write is re-read and verified.
+    every write is re-read and verified. The legacy file is a read-only
+    fallback until 5.0; after that only SSM is read.
+
+    Targeting production requires typing the context/env name to confirm.
     """
     env = resolve.active_env(env)
     rc, session = resolve.rc_session_of(env)

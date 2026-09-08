@@ -207,3 +207,66 @@ def test_metadata_upload_help_explains_where_the_version_comes_from():
     rendered = _rendered(runner.invoke(app, ["metadata", "upload", "--help"]))
     assert "typing the context/env name" in rendered
     assert "--prod-confirmed" not in rendered
+
+
+def test_new_developer_audit_help_fixes():
+    """
+    Background: a walkthrough of every --help by a developer new to the stack
+    (2026-09-08) found gates that exist in code but not in help, a --dry-run
+    that writes, a default stated on one sibling but not the other, hidden
+    flags named in visible help, and jargon with no pointer. Each fix is one
+    or two sentences; this pins them so they cannot silently regress.
+
+    Input:    the --help of each command named below
+    Expected: the quoted phrase renders in that command's help.
+    """
+    checks = [
+        # gates that already ran in code now say so
+        (["study", "add"], "typing the context/env name"),
+        (["study", "repoint"], "typing the context/env name"),
+        (["study", "migrate"], "typing the context/env name"),
+        (["synth", "delete"], "typing the context/env name"),
+        # repoint states its mutually exclusive flags and has an example
+        (["study", "repoint"], "exactly one of --release"),
+        (["study", "repoint"], "g3dt study repoint --release v2.1.0"),
+        # k8s: laptop/browser requirement and examples on every command
+        (["k8s", "restart-schema"], "browser opens"),
+        (["k8s", "restart-etl"], "browser opens"),
+        (["k8s", "restart-ms"], "browser opens"),
+        (["k8s", "restart-ms"], "g3dt k8s restart-ms --env staging"),
+        (["k8s"], "laptop only"),
+        # same default and CDK key names on both deploy flows
+        (["synth", "generate"], "Default: 30 per study"),
+        (["dict", "deploy"], "k8s.schemaRestartServices"),
+        (["synth", "deploy"], "k8s.etlCronjob"),
+        # a --dry-run that writes says so
+        (["indexd", "register"], "still writes that table"),
+        # --which values explained on both pipeline commands
+        (["pipeline", "status"], "dbtReleaseBuilder"),
+        (["pipeline", "logs"], "writeReleaseInfo"),
+        # jobs: where records live and who prints a run id
+        (["jobs"], "runs.json"),
+        (["jobs"], "indexd register"),
+        # dict status exists and explains both versions
+        (["dict", "status"], "declared"),
+        (["dict", "status"], "--strict"),
+        # global --version
+        ([], "--version"),
+    ]
+    for cmd, phrase in checks:
+        rendered = _rendered(runner.invoke(app, [*cmd, "--help"]))
+        assert phrase in rendered, f"{cmd}: missing {phrase!r}"
+
+    # hidden flags / hidden commands are no longer named in visible help
+    rendered = _rendered(runner.invoke(app, ["metadata", "upload-all", "--help"]))
+    assert "--prod-confirmed" not in rendered
+    rendered = _rendered(runner.invoke(app, ["synth", "set-key", "--help"]))
+    assert "config set" not in rendered
+
+    # `g3dt docs` no longer calls synthetic data test-only, lists upload-all
+    # among the --on ec2 commands, and carries the glossary
+    docs = runner.invoke(app, ["docs"]).stdout
+    assert "test only" not in docs
+    assert "upload-all" in docs
+    assert "Words the help texts use" in docs
+    assert "docs/design/studies.md" in docs

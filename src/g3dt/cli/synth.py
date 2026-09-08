@@ -214,11 +214,13 @@ def deploy(
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services",
         help="Comma-separated deployment names restarted during the deploy, in "
-        "order; default: the env's SSM app/restart_services.",
+        "order; default: the env's SSM app/restart_services (the CDK "
+        "config's k8s.schemaRestartServices).",
     ),
     etl_cronjob: Optional[str] = typer.Option(
         None, "--etl-cronjob",
-        help="ETL cronjob name; default: the env's SSM app/etl_cronjob.",
+        help="ETL cronjob name; default: the env's SSM app/etl_cronjob (the "
+        "CDK config's k8s.etlCronjob).",
     ),
     studies: str = typer.Option(
         ..., "--studies", "-s",
@@ -342,7 +344,8 @@ def generate(
         None,
         "--num-records",
         "-n",
-        help="Records per study: one number for all, or a comma list (one per study).",
+        help="Records per study: one number for all, or a comma list (one per "
+        "study). Default: 30 per study.",
     ),
     provider: Provider = typer.Option(
         Provider.random, "--provider",
@@ -525,7 +528,9 @@ def delete(
         None, "--env", "-e", help=ENV_OPT_SYNTH
     ),
     projects: Optional[str] = typer.Option(
-        None, "--projects", "-p", help="Comma-separated simulated project ids."
+        None, "--projects", "-p",
+        help="Comma-separated simulated project ids (the same ids `synth "
+        "deploy`/`synth upload` call --studies).",
     ),
     import_order: Optional[Path] = typer.Option(
         None,
@@ -536,7 +541,21 @@ def delete(
         help="DataImportOrder.txt path (default: DataImportOrder.txt in the cwd).",
     ),
 ) -> None:
-    """Delete previously-uploaded synthetic metadata from Gen3."""
+    """Delete previously-uploaded synthetic metadata from Gen3.
+
+    Walks the nodes in DataImportOrder.txt in reverse and deletes every
+    record of each project through sheepdog. Commons-side only: the local
+    batch directories are untouched. Nodes whose file_state is anything but
+    null/registered cannot be deleted by the API (sheepdog refuses); see
+    `g3dt delete metadata --synthetic` for the registry-free, version-aware
+    alternative. There is no rollback, but synthetic data is regenerable.
+
+    Examples:
+      g3dt synth delete --env test -p synthetic_dataset_1 -i /abs/path/DataImportOrder.txt
+      g3dt synth delete --env test -p s1,s2
+
+    Targeting production requires typing the context/env name to confirm.
+    """
     env = resolve.active_env(env)
     e = env_of(env)
     safety.confirm_prod_strict("synthetic metadata deletion", env)
@@ -556,7 +575,13 @@ def delete(
 
 @app.command(name="install-simulator")
 def install_simulator() -> None:
-    """Install or upgrade the gen3-metadata-simulator generator (the 'synth' extra)."""
+    """Install or upgrade the gen3-metadata-simulator generator.
+
+    Runs `pip install --upgrade gen3-metadata-simulator` with the interpreter
+    that owns this g3dt — for a pipx install that is the pipx venv, which is
+    what `pipx inject gen3-dataops-toolkit gen3-metadata-simulator` would
+    also do. Needed once before `synth generate`/`synth deploy`.
+    """
     import sys
 
     # --upgrade so re-running after a simulator release actually updates it;
@@ -575,8 +600,12 @@ def set_key(
     """Remember where your LLM API key lives (for --llm generation).
 
     Writes ``llm_api_key_file`` into the local g3dt.yaml marker — the key
-    itself never leaves the file you name. This replaces the deprecated
-    ``g3dt config set llm_api_key_file`` spelling.
+    itself never leaves the file you name. `g3dt config show` reports the
+    path as llm_api_key_file; the ANTHROPIC_API_KEY / OPENAI_API_KEY
+    environment variables also work.
+
+    Example:
+      g3dt synth set-key ~/.g3dt/anthropic_api_key
     """
     resolve.announce_context()
     resolved = Path(path).expanduser()
