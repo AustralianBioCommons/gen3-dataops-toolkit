@@ -37,6 +37,11 @@ def _version(env_cfg, override):
     return override or env_cfg.dictionary_version
 
 
+def _bare_version(v) -> str:
+    """``v1.2.0`` / ``1.2.0`` / ``V1.2.0`` -> ``1.2.0`` (None -> "")."""
+    return (v or "").strip().lstrip("vV")
+
+
 def warn_if_overridden(env_cfg, version: Optional[str]) -> None:
     """Say so, loudly, when the deployed version isn't the one SSM declares.
 
@@ -148,7 +153,9 @@ def status(
         stamp = deployed or "(no version stamp on the object)"
         when = uploaded.strftime("%Y-%m-%d %H:%M %Z") if hasattr(uploaded, "strftime") else uploaded
         typer.echo(f"deployed : {stamp}   (s3://{location}, uploaded {when})")
-        state = "in sync" if deployed == declared else "DRIFT"
+        # The S3 stamp is the JSON's _settings _dict_version (often "1.2.0")
+        # while the declared tag carries the git "v" prefix; the same version.
+        state = "in sync" if _bare_version(deployed) == _bare_version(declared) else "DRIFT"
     if state == "in sync":
         typer.secho("status   : in sync", fg=typer.colors.GREEN)
         return

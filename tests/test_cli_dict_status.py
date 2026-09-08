@@ -103,3 +103,22 @@ def test_missing_object_says_so_instead_of_crashing():
     assert result.exit_code == 0, result.output
     assert "nothing at s3://" in result.stdout
     assert "g3dt dict deploy" in result.stdout
+
+
+@mock_aws
+def test_stamp_without_v_prefix_is_in_sync_with_the_declared_tag():
+    """
+    Background: on ACDC staging (2026-09-08) the S3 object was stamped
+    `1.2.0` — the JSON's _settings _dict_version has no `v` — while SSM
+    declares the git tag `v1.2.0`. The first cut of `dict status` called that
+    DRIFT. They are the same version and must compare equal.
+
+    Inputs:  SSM declares v1.2.0; the S3 object is stamped version=1.2.0
+    Expected: 'in sync', exit 0 with --strict.
+    """
+    _seed("v1.2.0")
+    _put_schema("1.2.0")
+    result = runner.invoke(app, ["dict", "status", "--env", "staging", "--strict"])
+    assert result.exit_code == 0, result.output
+    assert "in sync" in result.stdout
+    assert "DRIFT" not in result.stdout
