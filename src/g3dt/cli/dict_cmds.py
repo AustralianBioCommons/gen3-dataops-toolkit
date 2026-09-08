@@ -14,12 +14,21 @@ from typing import Optional
 
 import typer
 
-from g3dt.config import dictionary_filename, dictionary_url, script_env
+from g3dt.config import (
+    ConfigError,
+    dictionary_filename,
+    dictionary_url,
+    normalize_s3_location,
+    script_env,
+)
 from g3dt.cli._internal import resolve, runner, safety
 from g3dt.cli._internal.resolve import env_of
 from g3dt.cli._internal.helptext import ENV_OPT
 
-app = typer.Typer(no_args_is_help=True, help="Data dictionary operations (local).")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Data dictionary operations: pull, upload, deploy, status (local).",
+)
 
 SCHEMA_DIR = Path("~/.g3dt/schemas").expanduser()
 
@@ -79,6 +88,82 @@ def pull(
 
 
 @app.command()
+def status(
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    strict: bool = typer.Option(
+        False, "--strict",
+        help="Exit 1 when the deployed version differs from the declared one.",
+    ),
+) -> None:
+    """Show which dictionary version is deployed, next to the declared one.
+
+    Declared is the env's `dictionary_version` (a CDK input — what
+    `g3dt config show` reports). Deployed is the `version` stamped on the S3
+    object at `schema_s3_uri` by `dict upload`, i.e. what the commons'
+    services actually read on their next restart. The two drift after
+    `dict deploy --version <tag>` until the CDK config is updated and
+    redeployed (`g3dt config diff` shows that half). Read-only.
+
+    Examples:
+      g3dt dict status --env staging
+      g3dt dict status --env staging --strict    # drift gate for scripts
+    """
+    from botocore.exceptions import ClientError
+
+    env = resolve.active_env(env)
+    e = env_of(env)
+    _, session = resolve.rc_session_of(env)
+    try:
+        location = normalize_s3_location(e.schema_s3_uri, param="schema_s3_uri")
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if "/" not in location:
+        typer.secho(
+            f"schema_s3_uri '{e.schema_s3_uri}' has no object key — expected "
+            f"<bucket>/<key>.", fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    bucket, key = location.split("/", 1)
+    deployed, uploaded = None, None
+    try:
+        head = session.client("s3").head_object(Bucket=bucket, Key=key)
+        deployed = head.get("Metadata", {}).get("version")
+        uploaded = head.get("LastModified")
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in ("404", "NoSuchKey", "NotFound"):
+            typer.secho(
+                f"Cannot read s3://{location} ({code or exc}).",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(1)
+
+    declared = e.dictionary_version
+    typer.echo(f"declared : {declared}   (SSM app/dictionary_version)")
+    if uploaded is None:
+        typer.echo(f"deployed : (nothing at s3://{location} — run `g3dt dict deploy`)")
+        state = "MISSING"
+    else:
+        stamp = deployed or "(no version stamp on the object)"
+        when = uploaded.strftime("%Y-%m-%d %H:%M %Z") if hasattr(uploaded, "strftime") else uploaded
+        typer.echo(f"deployed : {stamp}   (s3://{location}, uploaded {when})")
+        state = "in sync" if deployed == declared else "DRIFT"
+    if state == "in sync":
+        typer.secho("status   : in sync", fg=typer.colors.GREEN)
+        return
+    typer.secho(
+        f"status   : {state} — the services will read {deployed or 'nothing'} "
+        f"while the CDK config declares {declared}. Deploy with "
+        f"`g3dt dict deploy`, or update dictionaryVersion in the wrapper "
+        f"config and redeploy.",
+        fg=typer.colors.YELLOW,
+    )
+    if strict:
+        raise typer.Exit(1)
+
+
+@app.command()
 def upload(
     env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
     version: Optional[str] = typer.Option(
@@ -87,6 +172,13 @@ def upload(
     ),
 ) -> None:
     """Upload the (already pulled) dictionary JSON to the env's S3 location.
+
+    Stamps the object's S3 metadata `version` from the JSON's _settings, which
+    is what `g3dt dict status` reads back.
+
+    Examples:
+      g3dt dict upload --env staging
+      g3dt dict upload --env staging --version v1.1.7
 
     Targeting production requires typing the context/env name to confirm.
     """
@@ -116,7 +208,8 @@ def deploy(
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services",
         help="Comma-separated deployment names restarted after the upload, in "
-        "order; default: the env's SSM app/restart_services.",
+        "order; default: the env's SSM app/restart_services (the CDK "
+        "config's k8s.schemaRestartServices).",
     ),
     sync: bool = typer.Option(
         False, "--sync",
@@ -131,8 +224,9 @@ def deploy(
     unless --sync is given.
 
     The version defaults to the env's `dictionary_version`, a CDK INPUT: edit
-    config/<project>.<env>.json in gen3-aws-data-pipeline and `cdk deploy` to
-    change what an env declares. Pass --version to deploy a different tag now
+    config/<project>.<env>.json in your deployment wrapper (the repo that pins
+    the aws-gen3-pipeline template) and `cdk deploy` to change what an env
+    declares. Pass --version to deploy a different tag now
     without that round trip — which is how one dictionary gets promoted across
     environments. `g3dt config diff` reports the resulting drift until the CDK
     config catches up.

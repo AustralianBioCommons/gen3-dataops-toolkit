@@ -114,3 +114,18 @@ def test_no_configuration_prints_none_configured_banner(_clean):
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "none configured" in result.stderr.splitlines()[0]
+
+@patch("g3dt.cli.main.installed_version", return_value="9.9.9")
+def test_global_version_flag_prints_version_and_exits(_v):
+    """
+    Background: every CLI a new developer has used answers `--version`;
+    g3dt only had the `version` subcommand, and -v was taken by dictionary
+    tags. 5.0.0 adds the long-only global flag.
+
+    Input:    g3dt --version
+    Expected: exit 0, the version alone on stdout, and no sub-command run
+              (nothing else printed).
+    """
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "9.9.9"

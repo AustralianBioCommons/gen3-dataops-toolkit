@@ -33,6 +33,23 @@ app = typer.Typer(
 )
 
 
+def installed_version() -> str:
+    """The installed gen3-dataops-toolkit version, or 'unknown'."""
+    try:
+        from importlib.metadata import version as _v
+
+        return _v("gen3-dataops-toolkit")
+    except Exception:  # pragma: no cover - fallback when not installed
+        return "unknown"
+
+
+def _version_flag(value: bool) -> None:
+    """``g3dt --version``: print the version and exit (no context banner)."""
+    if value:
+        typer.echo(installed_version())
+        raise typer.Exit()
+
+
 @app.callback()
 def _root(
     ctx_name: Optional[str] = typer.Option(
@@ -41,6 +58,14 @@ def _root(
         "-c",
         help="One-shot context override, e.g. myproj/staging "
              "(see 'g3dt config contexts').",
+    ),
+    _version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_flag,
+        is_eager=True,
+        help="Print the installed toolkit version and exit "
+             "(same as 'g3dt version').",
     ),
 ) -> None:
     """Record the global --ctx override before any sub-command runs."""
@@ -93,9 +118,10 @@ Mental model: two execution planes
     `argocd login --sso` browser flow and AWS named profiles, so they run on
     your laptop only. They never run `argocd app sync` unless you pass
     --sync (add it only when the commons app is behind the merged revision).
-  - Data plane (LONG jobs): metadata upload/delete, indexd register. Add
-    `--on ec2` to run them on the env's job box via SSM (disconnect-safe);
-    watch with `g3dt jobs status|logs <run-id> --follow`.
+  - Data plane (LONG jobs): metadata upload / upload-all, delete metadata,
+    indexd register. Add `--on ec2` to run them on the env's job box via SSM
+    Run Command (disconnect-safe); each dispatch prints a run id — watch it
+    with `g3dt jobs status|logs <run-id> --follow`.
 
 Discover everything
   g3dt --help                      list all command groups
@@ -145,7 +171,7 @@ Data releases (the dbt pipeline; see the project's dbt repo)
   g3dt pipeline logs   --env staging --follow  live dbt + release-writer output
   (the pipeline itself runs `g3dt release write` — no names needed anywhere)
 
-Synthetic data (test only, all local)
+Synthetic data (all local; a production target needs the typed confirmation)
   g3dt synth deploy --env test --studies synthetic_dataset_1 -n 100
   Batches are only schema-valid against the dictionary that generated them, so
   each one records its dictionary version and `g3dt synth upload` refuses a
@@ -160,6 +186,25 @@ EC2 / SSM prerequisites
 NOT run by this CLI: the Glue jobs (validation, release-JSON). The CodeBuild
 dbt pipelines are triggered from the project's dbt repo (branch push = CI,
 data-v* tag = release) and watched with `g3dt pipeline status|logs`.
+
+Words the help texts use
+  SSM                 AWS Systems Manager. Two of its services matter here:
+                      Parameter Store (the /{project}/{env}/... tree every
+                      command reads) and Run Command (how --on ec2 starts a
+                      job on the box).
+  deployment wrapper  the small private repo that pins the aws-gen3-pipeline
+                      CDK template and holds config/<project>.<env>.json —
+                      the INPUT file `g3dt config diff --file` compares
+                      against. The CDK config's optional blocks (k8s, llm)
+                      are the ones the restart and synth flags default from.
+  run id              printed by every --on ec2 dispatch, e.g.
+                      20260908T093000-metadata-upload; recorded locally in
+                      ~/.g3dt/ for `g3dt jobs list|status|logs`.
+  typed gate          on a production context, mutating commands ask you to
+                      type the context name; --yes never bypasses it.
+
+More: docs/design/contexts.md (contexts), docs/design/studies.md (the study
+registry), docs/INGEST.md (ingest) in the toolkit repo.
 """
 
 
@@ -174,16 +219,16 @@ def docs() -> None:
 
 @app.command()
 def version() -> None:
-    """Print the installed gen3-dataops-toolkit version."""
+    """Print the installed gen3-dataops-toolkit version (also: g3dt --version).
+
+    Reports the version of the installation that owns this `g3dt` command
+    (pipx venv, pip, or a `poetry install`ed checkout) — not the version of
+    a source tree you happen to be in.
+    """
     from g3dt.cli._internal import resolve
 
     resolve.announce_context()
-    try:
-        from importlib.metadata import version as _v
-
-        typer.echo(_v("gen3-dataops-toolkit"))
-    except Exception:  # pragma: no cover - fallback when not installed
-        typer.echo("unknown")
+    typer.echo(installed_version())
 
 
 def main() -> None:
