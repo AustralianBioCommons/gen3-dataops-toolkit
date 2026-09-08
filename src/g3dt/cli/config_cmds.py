@@ -24,6 +24,7 @@ from typing import List, Optional
 import typer
 
 from g3dt import config, contexts
+from g3dt.cli import study_cmds
 from g3dt.cli._internal import resolve
 from g3dt.cli._internal.resolve import env_of, study_of
 from g3dt.cli._internal.helptext import ENV_OPT
@@ -35,8 +36,11 @@ app = typer.Typer(
          "stored in the local g3dt.yaml marker. Every command acts on the "
          "current context — switch with 'g3dt config use <name>', one-shot "
          "with --ctx. Discovery scans one SSO profile's AWS account at a "
-         "time ('g3dt config discover <profile>'). Run 'g3dt docs' for the "
-         "full model.",
+         "time ('g3dt config discover <profile>'). Deployed settings are "
+         "read-only here (they are CDK inputs); study records are edited "
+         "with 'g3dt config study-set' / 'g3dt study set' and moved to a "
+         "release with 'g3dt study repoint'. Run 'g3dt docs' for the full "
+         "model.",
 )
 
 
@@ -530,10 +534,49 @@ def envs() -> None:
 def studies(
     env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
 ) -> None:
-    """List the env's registered studies (alias of `g3dt study list`)."""
-    from g3dt.cli import study_cmds
+    """List the env's registered studies (alias of `g3dt study list`).
 
+    Inspect one with `g3dt config show --study <name>`; change its S3 path
+    or Gen3 ids with `g3dt config study-set <name> ...`.
+    """
     study_cmds.list_impl(env)
+
+
+@app.command("study-set")
+def study_set(
+    name: str = typer.Argument(..., help="Study name (see `g3dt config studies`)."),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    project_id: Optional[str] = typer.Option(
+        None, "--project-id", help=study_cmds.SET_PROJECT_ID_HELP
+    ),
+    program_id: Optional[str] = typer.Option(
+        None, "--program-id", help=study_cmds.SET_PROGRAM_ID_HELP
+    ),
+    path: Optional[str] = typer.Option(None, "--path", help=study_cmds.SET_PATH_HELP),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-d", help=study_cmds.SET_DRY_RUN_HELP
+    ),
+    no_verify: bool = typer.Option(
+        False, "--no-verify", help=study_cmds.SET_NO_VERIFY_HELP
+    ),
+) -> None:
+    """Update a study's S3 release location or Gen3 ids (alias of `g3dt study set`).
+
+    Only the fields you pass change. A new --path is checked in S3 first
+    (DataImportOrder.txt plus node JSONs) so an upload can never be pointed
+    at nothing. To move every study to a new release at once use
+    `g3dt study repoint`.
+
+    Examples:
+      g3dt config study-set cdah --path s3://my-gold/release_jsons/v2.1.0/cdah/ --dry-run
+      g3dt config study-set cdah --path s3://my-gold/release_jsons/v2.1.0/cdah/
+
+    Targeting production requires typing the context/env name to confirm.
+    """
+    study_cmds.set_impl(
+        name, env, project_id, program_id, path,
+        dry_run=dry_run, verify=not no_verify,
+    )
 
 
 @app.command()
@@ -586,6 +629,11 @@ def show(
         typer.echo(f"  project_id       : {s.project_id}")
         typer.echo(f"  program_id       : {s.program_id}")
         typer.echo(f"  s3_metadata_path : {s.s3_metadata_path}")
+        typer.secho(
+            f"  change with      : g3dt config study-set {s.key} --path s3://... "
+            f"| g3dt study repoint --release <tag>",
+            fg=typer.colors.BRIGHT_BLACK,
+        )
     if full:
         rc = resolve.rc_of(env)
         typer.secho(

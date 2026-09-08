@@ -135,6 +135,35 @@ gate fails -> inspect the results table -> fix data -> re-run until green.
 multi-study caller resolves the schema once, lists the validation prefix
 once, and batches all studies into a single Iceberg INSERT.
 
+### The study registry: what an upload sends, and from where
+
+Each study the pipeline can upload is one JSON record in the env's SSM tree
+(`/{project}/{env}/studies/<name>`) holding its Gen3 `project_id`,
+`program_id` and `s3_metadata_path` — the `s3://` prefix of that study's
+release JSONs (`DataImportOrder.txt` plus one `<node>.json` per node, exactly
+as the release export writes them). The environment lives in the path, so
+staging and prod records can never cross-resolve. `g3dt config` shows the
+registry but never edits deployed settings; the registry is the one thing the
+toolkit itself writes, through `g3dt study` (design: `docs/design/studies.md`):
+
+```bash
+g3dt study list                                   # bare names (config studies is an alias)
+g3dt study show cdah                              # record + liveness check of its S3 path
+g3dt study add cdah --project-id CAUGHT-CAD --program-id program1 \
+    --path s3://my-gold/release_jsons/v2.0.0/cdah/
+g3dt study set cdah --path s3://my-gold/release_jsons/v2.1.0/cdah/ --dry-run
+g3dt study set cdah --path s3://my-gold/release_jsons/v2.1.0/cdah/   # config study-set is an alias
+g3dt study repoint --release v2.1.0               # every study at once (--latest: newest tag)
+g3dt study remove cdah                            # registry entry only; data untouched
+```
+
+`set` and `repoint` check a new path in S3 before writing anything (the same
+`DataImportOrder.txt` + node-JSON checks `metadata upload` makes), so a typo
+cannot point an upload at nothing; `set --no-verify` records a path whose
+release is not exported yet. Every write on a production context requires
+typing the context name. To upload one release without moving the registry,
+use `g3dt metadata upload --release <tag>` (5.0.0).
+
 ### Where the data dictionary comes from
 
 Composed from the env's inputs as

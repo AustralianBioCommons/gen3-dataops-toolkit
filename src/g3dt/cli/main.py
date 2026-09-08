@@ -105,7 +105,18 @@ Discover everything
   g3dt config envs                 environments with a deployed SSM tree
   g3dt study list                  the env's study registry (config studies
                                    is an alias)
+  g3dt study show <name>           one study's record + a liveness check of
+                                   its S3 path
   g3dt config show                 resolved settings for the current context
+
+Changing a study's record (S3 location, Gen3 ids)
+  The registry is the only thing `config` lets you edit — deployed settings
+  are CDK inputs. Each write checks the new S3 prefix first (DataImportOrder.txt
+  + node JSONs) and gates production behind the typed context name.
+    g3dt study set <name> --path s3://<gold>/release_jsons/v2.1.0/<name>/ --dry-run
+    g3dt study set <name> --path s3://...           (g3dt config study-set is an alias)
+    g3dt study repoint --release v2.1.0             every study at once (--latest: newest)
+    g3dt study add <name> --project-id <Gen3 id> --program-id <program> --path s3://...
 
 Typical release runbook (staging shown; repeat for prod with care)
   1. g3dt dict deploy   --env staging

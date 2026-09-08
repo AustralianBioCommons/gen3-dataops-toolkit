@@ -161,3 +161,30 @@ def test_config_diff_missing_file_is_a_usage_error_not_a_traceback():
     )
     assert result.exit_code == 2
     assert "does not exist" in _rendered(result)
+
+
+def test_config_help_points_at_study_editing():
+    """
+    Background: a new operator asking "how do I change a study's S3 path?"
+    starts at `g3dt config` and, before 5.0.0, found nothing there — the
+    answer (`study set --path`) was four --help hops away and never named.
+
+    Input:    `config --help`, `config studies --help`,
+              `config study-set --help`, `study set --help`
+    Expected: config's group help names `study-set` and `study repoint`; the
+              studies alias points at `study-set`; the alias and the real
+              command both say what they change, carry --dry-run and
+              --no-verify, and state the production gate.
+    """
+    group = _rendered(runner.invoke(app, ["config", "--help"]))
+    assert "study-set" in group and "study repoint" in group
+
+    studies = _rendered(runner.invoke(app, ["config", "studies", "--help"]))
+    assert "config study-set" in studies
+
+    for cmd in (["config", "study-set"], ["study", "set"]):
+        rendered = _rendered(runner.invoke(app, [*cmd, "--help"]))
+        assert "S3 release location" in rendered, cmd
+        assert "--dry-run" in rendered and "--no-verify" in rendered, cmd
+        assert "typing the context/env name" in rendered, cmd
+        assert "study repoint" in rendered, cmd

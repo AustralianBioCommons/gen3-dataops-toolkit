@@ -35,6 +35,19 @@ _PATH_HELP = (
     "s3:// prefix holding this study's release JSONs, e.g. "
     "s3://<gold-bucket>/release_jsons/v1.2.0/mystudy/."
 )
+# Shared with the `g3dt config study-set` alias so both spellings read alike.
+SET_PROJECT_ID_HELP = "New Gen3 project_id."
+SET_PROGRAM_ID_HELP = "New Gen3 program."
+SET_PATH_HELP = (
+    "New S3 location of the study's release JSONs (the prefix `metadata "
+    "upload` reads from): " + _PATH_HELP + " Checked for DataImportOrder.txt "
+    "and node JSONs before anything is written."
+)
+SET_DRY_RUN_HELP = "Show field: old -> new (and the path check); write nothing."
+SET_NO_VERIFY_HELP = (
+    "Skip the S3 path check — e.g. registering a release that is not "
+    "exported yet."
+)
 
 
 def _usage(msg: str) -> None:
@@ -192,33 +205,42 @@ def add(
     )
 
 
-@app.command("set")
-def set_cmd(
-    name: str = typer.Argument(..., help="Study name (see `g3dt study list`)."),
-    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    project_id: Optional[str] = typer.Option(
-        None, "--project-id", help="New Gen3 project_id."
-    ),
-    program_id: Optional[str] = typer.Option(
-        None, "--program-id", help="New Gen3 program."
-    ),
-    path: Optional[str] = typer.Option(None, "--path", help=_PATH_HELP),
+def set_impl(
+    name: str,
+    env: Optional[str],
+    project_id: Optional[str],
+    program_id: Optional[str],
+    path: Optional[str],
+    *,
+    dry_run: bool = False,
+    verify: bool = True,
 ) -> None:
-    """Update fields on an existing study (read-merge-write, atomic)."""
+    """Shared by ``g3dt study set`` and the ``g3dt config study-set`` alias.
+
+    Order of operations mirrors ``repoint``: resolve, check the new path in
+    S3, print the diff, then (unless dry-run) gate production and write.
+    """
     if project_id is None and program_id is None and path is None:
         _usage(
             "Nothing to set — pass at least one of --project-id / "
             "--program-id / --path."
         )
+    for flag, value in (
+        ("--project-id", project_id),
+        ("--program-id", program_id),
+        ("--path", path),
+    ):
+        if value is not None and not value.strip():
+            _usage(f"{flag} cannot be empty.")
     env = resolve.active_env(env)
     if path is not None and not path.startswith("s3://"):
         _usage(f"--path must be an s3:// URI (got '{path}').")
     registry, source = _require_ssm_registry(env)
     sc = _resolve_in(registry, name, env, source)
     new = {
-        "project_id": project_id or sc.project_id,
-        "program_id": program_id or sc.program_id,
-        "s3_metadata_path": path or sc.s3_metadata_path,
+        "project_id": project_id if project_id is not None else sc.project_id,
+        "program_id": program_id if program_id is not None else sc.program_id,
+        "s3_metadata_path": path if path is not None else sc.s3_metadata_path,
     }
     old = {
         "project_id": sc.project_id,
@@ -228,16 +250,84 @@ def set_cmd(
     if new == old:
         typer.secho("No changes.", fg=typer.colors.YELLOW)
         return
-    safety.confirm_prod_strict("study set", env)
     rc, session = resolve.rc_session_of(env)
+    if new["s3_metadata_path"] != old["s3_metadata_path"]:
+        if verify:
+            try:
+                count = studies.validate_upload_prefix(
+                    new["s3_metadata_path"], session
+                )
+            except config.ConfigError as exc:
+                typer.secho(
+                    "Path check failed — nothing was written:",
+                    fg=typer.colors.RED, err=True,
+                )
+                typer.secho(f"  - {exc}", fg=typer.colors.RED, err=True)
+                typer.secho(
+                    "Pass --no-verify to record the path anyway (e.g. before "
+                    "the release is exported).",
+                    fg=typer.colors.YELLOW, err=True,
+                )
+                raise typer.Exit(1)
+            typer.echo(
+                f"liveness : PASS (DataImportOrder.txt + {count} node JSONs)"
+            )
+        else:
+            typer.secho(
+                "liveness : SKIPPED (--no-verify)", fg=typer.colors.YELLOW
+            )
+    for field in studies.FIELDS:
+        if new[field] != old[field]:
+            typer.echo(f"{field}: {old[field]} -> {new[field]}")
+    if dry_run:
+        typer.secho(
+            f"Dry run — study '{sc.key}' not updated.", fg=typer.colors.YELLOW
+        )
+        return
+    safety.confirm_prod_strict("study set", env)
     try:
         studies.put_study(rc, session, sc.key, overwrite=True, **new)
     except config.ConfigError as exc:
         _fail(str(exc))
-    for field in studies.FIELDS:
-        if new[field] != old[field]:
-            typer.echo(f"{field}: {old[field]} -> {new[field]}")
     typer.secho(f"Updated study '{sc.key}'.", fg=typer.colors.GREEN)
+
+
+@app.command("set")
+def set_cmd(
+    name: str = typer.Argument(..., help="Study name (see `g3dt study list`)."),
+    env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    project_id: Optional[str] = typer.Option(
+        None, "--project-id", help=SET_PROJECT_ID_HELP
+    ),
+    program_id: Optional[str] = typer.Option(
+        None, "--program-id", help=SET_PROGRAM_ID_HELP
+    ),
+    path: Optional[str] = typer.Option(None, "--path", help=SET_PATH_HELP),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-d", help=SET_DRY_RUN_HELP
+    ),
+    no_verify: bool = typer.Option(False, "--no-verify", help=SET_NO_VERIFY_HELP),
+) -> None:
+    """Update a study's Gen3 ids or its S3 release location.
+
+    The record is read, merged and written back atomically; only the fields
+    you pass change. A new --path is checked in S3 first (DataImportOrder.txt
+    plus node JSONs — the exact checks `metadata upload` makes), so a typo
+    cannot point an upload at nothing. To move EVERY study to a new release
+    at once use `g3dt study repoint` instead; `g3dt config study-set` is an
+    alias of this command.
+
+    Examples:
+      g3dt study set cdah --path s3://my-gold/release_jsons/v2.1.0/cdah/ --dry-run
+      g3dt study set cdah --path s3://my-gold/release_jsons/v2.1.0/cdah/
+      g3dt study set cdah --program-id program2 --env staging
+
+    Targeting production requires typing the context/env name to confirm.
+    """
+    set_impl(
+        name, env, project_id, program_id, path,
+        dry_run=dry_run, verify=not no_verify,
+    )
 
 
 @app.command()

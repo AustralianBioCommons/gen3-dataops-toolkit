@@ -474,3 +474,140 @@ def test_repoint_prod_gate_sits_between_diff_and_write():
     assert json.loads(_param("cdah", env="prod"))["s3_metadata_path"] == _path(
         "v2.1.0", "cdah"
     )
+
+
+# --------------------------------------------------------------------------- #
+# set: path verification, dry run, and the config study-set alias (5.0.0)     #
+# --------------------------------------------------------------------------- #
+@mock_aws
+def test_set_path_is_verified_in_s3_then_written():
+    """
+    Background: `study set --path` is how an operator changes where an upload
+    reads a study's release JSONs from. Until 5.0.0 it only checked the
+    string started with s3://, so a typo pointed the next upload at nothing.
+
+    Inputs:  study cdah at v2.0.0; a valid v2.1.0 prefix exists in S3;
+             `study set cdah --path <v2.1.0 path>`
+    Expected: liveness PASS printed, the old -> new line printed, and the SSM
+              record now holds the v2.1.0 path.
+    """
+    _seed_tree()
+    _seed_release_prefix("v2.1.0", "cdah")
+    _seed_study("cdah", _path("v2.0.0", "cdah"))
+    result = runner.invoke(
+        app,
+        ["study", "set", "cdah", "--env", "staging", "--path", _path("v2.1.0", "cdah")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "liveness : PASS" in result.stdout
+    assert f"s3_metadata_path: {_path('v2.0.0', 'cdah')} -> {_path('v2.1.0', 'cdah')}" in result.stdout
+    assert json.loads(_param("cdah"))["s3_metadata_path"] == _path("v2.1.0", "cdah")
+
+
+@mock_aws
+def test_set_missing_prefix_writes_nothing_and_names_the_fix():
+    """
+    Inputs:  `study set cdah --path <v9.9.9 path>` where nothing exists in S3
+             under that prefix
+    Expected: exit 1, the record is untouched, and stderr names both the
+              missing DataImportOrder.txt and the --no-verify escape hatch.
+    """
+    _seed_tree()
+    _seed_release_prefix("v2.0.0", "cdah")  # creates the bucket
+    _seed_study("cdah", _path("v2.0.0", "cdah"))
+    result = runner.invoke(
+        app,
+        ["study", "set", "cdah", "--env", "staging", "--path", _path("v9.9.9", "cdah")],
+    )
+    assert result.exit_code == 1, result.output
+    assert "Path check failed" in result.stderr
+    assert "DataImportOrder.txt" in result.stderr
+    assert "--no-verify" in result.stderr
+    assert json.loads(_param("cdah"))["s3_metadata_path"] == _path("v2.0.0", "cdah")
+
+
+@mock_aws
+def test_set_no_verify_records_an_unexported_path():
+    """
+    Inputs:  the same missing prefix, plus --no-verify (a release that has
+             not been exported yet)
+    Expected: exit 0, 'liveness : SKIPPED' printed, record updated.
+    """
+    _seed_tree()
+    _seed_release_prefix("v2.0.0", "cdah")
+    _seed_study("cdah", _path("v2.0.0", "cdah"))
+    result = runner.invoke(
+        app,
+        ["study", "set", "cdah", "--env", "staging",
+         "--path", _path("v9.9.9", "cdah"), "--no-verify"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "liveness : SKIPPED" in result.stdout
+    assert json.loads(_param("cdah"))["s3_metadata_path"] == _path("v9.9.9", "cdah")
+
+
+@mock_aws
+def test_set_dry_run_shows_diff_and_check_but_writes_nothing():
+    """
+    Inputs:  `study set cdah --path <valid v2.1.0 path> --dry-run`
+    Expected: the S3 check still runs (PASS), the diff line is printed, the
+              'Dry run' notice appears, and the SSM record is unchanged —
+              same contract as `study repoint --dry-run`.
+    """
+    _seed_tree()
+    _seed_release_prefix("v2.1.0", "cdah")
+    _seed_study("cdah", _path("v2.0.0", "cdah"))
+    result = runner.invoke(
+        app,
+        ["study", "set", "cdah", "--env", "staging",
+         "--path", _path("v2.1.0", "cdah"), "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "liveness : PASS" in result.stdout
+    assert "s3_metadata_path:" in result.stdout
+    assert "Dry run" in result.stdout
+    assert json.loads(_param("cdah"))["s3_metadata_path"] == _path("v2.0.0", "cdah")
+
+
+@mock_aws
+def test_set_empty_value_is_usage_error_not_silently_ignored():
+    """
+    Background: the old merge used `path or sc.s3_metadata_path`, so
+    `--path ""` quietly kept the old value while reporting success.
+
+    Inputs:  `study set cdah --program-id ""`
+    Expected: exit 2 with the flag named; record untouched.
+    """
+    _seed_tree()
+    _seed_study("cdah", _path("v2.0.0", "cdah"))
+    result = runner.invoke(
+        app, ["study", "set", "cdah", "--env", "staging", "--program-id", ""]
+    )
+    assert result.exit_code == 2, result.output
+    assert "--program-id cannot be empty" in result.stderr
+    assert json.loads(_param("cdah"))["program_id"] == "program1"
+
+
+@mock_aws
+def test_config_study_set_alias_writes_the_same_record():
+    """
+    Background: operators look for "change a study's S3 path" under
+    `g3dt config` first; 5.0.0 adds `config study-set` as an alias so that
+    search ends in the right place.
+
+    Inputs:  `config study-set cdah --path <valid v2.1.0 path>`
+    Expected: identical outcome to `study set` — PASS line, diff line, and
+              the record updated.
+    """
+    _seed_tree()
+    _seed_release_prefix("v2.1.0", "cdah")
+    _seed_study("cdah", _path("v2.0.0", "cdah"))
+    result = runner.invoke(
+        app,
+        ["config", "study-set", "cdah", "--env", "staging",
+         "--path", _path("v2.1.0", "cdah")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "liveness : PASS" in result.stdout
+    assert "Updated study 'cdah'" in result.stdout
+    assert json.loads(_param("cdah"))["s3_metadata_path"] == _path("v2.1.0", "cdah")
