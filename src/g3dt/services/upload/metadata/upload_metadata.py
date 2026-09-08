@@ -28,7 +28,19 @@ def setup_logger(debug=False):
 
 
 # Shared config resolution (SSM-backed) — see src/g3dt/config.py
-from g3dt import config as g3dt_config, resolver  # noqa: E402
+from g3dt import config as g3dt_config, resolver, studies  # noqa: E402
+
+
+def release_base_dir(registry_path: str, release: str) -> tuple:
+    """``(tag, prefix)`` for uploading ``release`` of a study.
+
+    The registry path's ``vX.Y.Z`` segment is swapped for the requested tag;
+    ``v2.1.0`` and ``2.1.0`` both mean ``2.1.0``. Raises ``ConfigError`` for
+    a malformed tag or a registry path with no version segment (set the
+    full path with ``g3dt study set --path`` instead).
+    """
+    tag = studies.normalise_release_tag(release)
+    return tag, studies.replace_version_segment(registry_path, tag)
 
 
 def main():
@@ -39,6 +51,13 @@ def main():
     parser.add_argument(
         "--env", required=True,
         help="Environment to upload to (e.g., test, staging, prod, staging_ec2, prod_ec2)"
+    )
+    parser.add_argument(
+        "--release",
+        help="Upload this release (x.y.z or vx.y.z) instead of the registry "
+        "path: the study's s3_metadata_path with its vX.Y.Z segment swapped. "
+        "The prefix is verified (DataImportOrder.txt + node JSONs) before "
+        "anything is submitted; the registry is not changed.",
     )
     parser.add_argument("--specific-node", help="Submit only a specific node")
     parser.add_argument(
@@ -68,6 +87,17 @@ def main():
     project_id = study_cfg.project_id
     program_id = study_cfg.program_id
     base_dir = study_cfg.s3_metadata_path
+    release_tag = None
+    if args.release:
+        try:
+            release_tag, base_dir = release_base_dir(base_dir, args.release)
+        except g3dt_config.ConfigError as exc:
+            logger.error(str(exc))
+            sys.exit(1)
+        logger.info(
+            f"--release {release_tag}: uploading from {base_dir} instead of "
+            f"the registry path {study_cfg.s3_metadata_path}"
+        )
 
     aws_secret_name = env_cfg.aws_secret_name
     aws_profile = env_cfg.aws_profile
@@ -96,6 +126,19 @@ def main():
     session = create_boto3_session(
         aws_profile=aws_profile, aws_region=aws_region
     )
+
+    if release_tag:
+        # The registry path was proven uploadable when it was set; a swapped
+        # release prefix has not been, so prove it before touching sheepdog.
+        try:
+            count = studies.validate_upload_prefix(base_dir, session)
+        except g3dt_config.ConfigError as exc:
+            logger.error(
+                f"Release {release_tag} is not uploadable for {args.study} — "
+                f"nothing was submitted: {exc}"
+            )
+            sys.exit(1)
+        logger.info(f"Release {release_tag} verified: {count} node JSONs under {base_dir}")
 
     logger.info("Listing metadata JSON files in S3 directory.")
     metadata_files = list_metadata_jsons_s3(s3_uri=base_dir, session=session)
@@ -144,6 +187,17 @@ def main():
         aws_profile=aws_profile,
         aws_region=aws_region,
     )
+
+    # The receipts table records the version parsed from the file paths; with
+    # --release that MUST be the requested tag, or the audit trail would lie.
+    if release_tag:
+        derived = submitter._collect_versions_from_metadata_file_list()
+        if derived != release_tag:
+            logger.error(
+                f"Refusing to upload: files under {base_dir} carry version "
+                f"{derived}, not the requested release {release_tag}."
+            )
+            sys.exit(1)
 
     # Pre-flight: uploads are additive, so re-running one silently doubles
     # the project's records at that version. Refuse when the audit table

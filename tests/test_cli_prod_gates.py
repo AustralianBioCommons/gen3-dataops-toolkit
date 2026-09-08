@@ -144,3 +144,67 @@ def test_k8s_restart_uses_context_name_as_token_for_prod_context(tmp_path, monke
     assert result.exit_code == 0, result.output
     assert "etl/prod" in result.output  # the token the prompt demands
     mock_run.assert_called_once()
+
+
+# --- metadata upload (single study) gained the gate in 5.0.0 ---------------
+#
+# Background: `metadata upload-all` has required a typed confirmation on
+# production since 4.0, but the single-study `metadata upload` wrote to the
+# live commons with no gate and no warning — the ACDC runsheet carried a
+# standing warning about it. Same gate, same token, same --yes-never-bypasses
+# rule as every other production write.
+
+from g3dt.config import StudyConfig
+
+
+def _study_cfg(study: str, env: str) -> StudyConfig:
+    base = env[:-4] if env.endswith("_ec2") else env
+    return StudyConfig(
+        key=f"{study}_{base}", project_id=study.title(), program_id="program1",
+        s3_metadata_path=f"s3://b/release_jsons/v1.0.0/{study}/",
+    )
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_prod_aborts_without_typed_confirmation(mock_run, _s, _e):
+    """
+    Inputs:  g3dt metadata upload --study ausdiab --env prod   (empty confirmation)
+    Expected: exit 1 and the worker never runs.
+    """
+    result = runner.invoke(
+        app, ["metadata", "upload", "--study", "ausdiab", "--env", "prod"], input="\n"
+    )
+    assert result.exit_code == 1
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_prod_proceeds_when_env_typed(mock_run, _s, _e):
+    """
+    Inputs:  g3dt metadata upload --study ausdiab --env prod   (types 'prod')
+    Expected: the typed token opens the gate and the worker runs once.
+    """
+    result = runner.invoke(
+        app, ["metadata", "upload", "--study", "ausdiab", "--env", "prod"], input="prod\n"
+    )
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_staging_runs_without_prompt(mock_run, _s, _e):
+    """
+    Inputs:  g3dt metadata upload --study ausdiab --env staging  (no stdin)
+    Expected: non-prod is unchanged — no prompt, runs once.
+    """
+    result = runner.invoke(
+        app, ["metadata", "upload", "--study", "ausdiab", "--env", "staging"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()

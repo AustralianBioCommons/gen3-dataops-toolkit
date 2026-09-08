@@ -124,6 +124,8 @@ Typical release runbook (staging shown; repeat for prod with care)
                                                  newest release (validates
                                                  every target first)
   3. g3dt metadata upload --study <study> --env staging --on ec2
+     (--release <tag> uploads another version of the study without moving
+     the registry; the prefix is checked in S3 first)
   4. g3dt jobs logs <run-id> --follow
   5. g3dt k8s restart-etl --env staging
 

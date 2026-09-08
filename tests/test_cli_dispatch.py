@@ -447,3 +447,37 @@ def test_jobs_stop_rejects_run_without_command_id(mock_session, mock_get):
     result = runner.invoke(app, ["jobs", "stop", "r"])
     assert result.exit_code == 1
     ssm.cancel_command.assert_not_called()
+
+
+@mock_aws
+@patch("g3dt.cli.metadata._release_preflight", return_value="s3://b/staging/v2.1.0/ausdiab/")
+@patch("g3dt.cli._internal.registry.record")
+@patch("g3dt.cli._internal.dispatch.create_boto3_session")
+def test_metadata_upload_release_on_ec2_forwards_the_tag(
+    mock_session, mock_record, mock_preflight
+):
+    """
+    Background: the remote command is rebuilt from a separate `remote_cli`
+    argv, so a flag added to the local worker call can silently go missing
+    on the EC2 path. --release must survive the hop.
+
+    Inputs:  g3dt metadata upload --study ausdiab --env staging --release v2.1.0 --on ec2
+    Expected Output: the S3 pre-flight ran on the laptop, and the SSM command
+    string contains `--release 2.1.0`.
+    """
+    _seed_env()
+    ssm = MagicMock()
+    ssm.send_command.return_value = {"Command": {"CommandId": "cmd-xyz"}}
+    session = MagicMock()
+    session.client.return_value = ssm
+    mock_session.return_value = session
+
+    result = runner.invoke(
+        app,
+        ["metadata", "upload", "--study", "ausdiab", "--env", "staging",
+         "--release", "v2.1.0", "--on", "ec2"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_preflight.assert_called_once()
+    command = ssm.send_command.call_args.kwargs["Parameters"]["commands"][0]
+    assert "--release 2.1.0" in command

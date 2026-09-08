@@ -103,3 +103,17 @@ def test_restart_wrapper_does_not_hardcode_the_service_list():
     flags = _flag_lines(RESTART_WRAPPER_SH.read_text())
     assert not any(f.startswith("-r") for f in flags), flags
     assert "sheepdog-deployment" not in RESTART_WRAPPER_SH.read_text()
+
+
+def test_upload_all_forwards_release_to_each_worker():
+    """
+    Background: `metadata upload-all --release` reaches the bulk bash script
+    as `--release <tag>`; the script must forward it to every
+    upload_metadata.py call or bulk uploads would silently use the registry
+    paths while the operator believes a release was chosen.
+
+    Expected: the script parses --release and appends it to UPLOAD_ARGS.
+    """
+    text = (SERVICES / "upload" / "metadata" / "upload_all_studies.sh").read_text()
+    assert "--release)" in text
+    assert 'UPLOAD_ARGS+=(--release "$RELEASE")' in text

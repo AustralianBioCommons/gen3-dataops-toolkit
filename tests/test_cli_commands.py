@@ -1027,3 +1027,126 @@ def test_synth_deploy_sync_is_opt_in(mock_run, _env):
     result = runner.invoke(app, [*base, "--sync"])
     assert result.exit_code == 0, result.output
     assert mock_run.call_args.kwargs["env"]["G3DT_SYNC"] == "1"
+
+
+# --- metadata upload --release (5.0.0) -------------------------------------
+
+
+@patch("g3dt.cli.metadata._release_preflight", return_value="s3://b/release_jsons/v2.1.0/ausdiab/")
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_release_preflights_then_forwards_bare_tag(
+    mock_run, _study, _env, mock_preflight
+):
+    """
+    Background: the worker derives the recorded version from the S3 paths,
+    which carry v-prefixed segments, while the receipts table and the
+    delete path use the bare x.y.z form. The CLI normalises once so every
+    layer sees the same tag.
+
+    Inputs:  g3dt metadata upload --study ausdiab --env staging --release v2.1.0
+    Expected Output: the S3 pre-flight runs with the bare tag, and the worker
+    argv carries `--release 2.1.0`.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload", "--study", "ausdiab", "--env", "staging",
+         "--release", "v2.1.0"],
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_preflight.call_args.args[1] == "2.1.0"
+    argv = _argv(mock_run)
+    i = argv.index("--release")
+    assert argv[i + 1] == "2.1.0"
+
+
+@patch("g3dt.cli.metadata._release_preflight")
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_release_bad_tag_is_usage_error(
+    mock_run, _study, _env, mock_preflight
+):
+    """
+    Inputs:  --release nope
+    Expected Output: exit 2 naming the expected x.y.z form; no S3 check and
+    no worker run.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload", "--study", "ausdiab", "--env", "staging",
+         "--release", "nope"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "x.y.z" in result.output
+    mock_preflight.assert_not_called()
+    mock_run.assert_not_called()
+
+
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_omits_release_by_default(mock_run, _study, _env):
+    """
+    Inputs:  g3dt metadata upload without --release
+    Expected Output: no --release in the worker argv, so the worker uploads
+    from the registry path exactly as before.
+    """
+    result = runner.invoke(
+        app, ["metadata", "upload", "--study", "ausdiab", "--env", "staging"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "--release" not in _argv(mock_run)
+
+
+@patch("g3dt.cli.metadata._release_preflight", return_value="s3://b/x/")
+@patch("g3dt.cli._internal.dispatch.resolve_env", side_effect=_env_cfg)
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_metadata_upload_all_preflights_every_study_then_forwards_release(
+    mock_run, _study, _env, mock_preflight
+):
+    """
+    Inputs:  g3dt metadata upload-all --studies ausdiab,caughtcad --env staging
+             --release 2.1.0
+    Expected Output: the pre-flight runs once per study BEFORE the bulk script
+    starts (one bad prefix stops everything), and the script argv carries
+    `--release 2.1.0` for it to forward to each worker.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload-all", "--studies", "ausdiab,caughtcad",
+         "--env", "staging", "--release", "2.1.0"],
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_preflight.call_count == 2
+    argv = _argv(mock_run)
+    i = argv.index("--release")
+    assert argv[i + 1] == "2.1.0"
+
+
+@patch("g3dt.cli._internal.dispatch.dispatch_ssm")
+@patch("g3dt.cli._internal.dispatch.resolve_dispatch_envs",
+       return_value=(_env_cfg("prod"), _env_cfg("prod_ec2")))
+@patch("g3dt.cli.metadata.study_of", side_effect=_study_cfg)
+def test_metadata_upload_prod_on_ec2_confirms_locally_and_marks_remote(
+    _study, _envs, mock_dispatch
+):
+    """
+    Background: the EC2 box has no TTY, so the production gate must fire on
+    the laptop and the remote re-entry must carry the hidden marker instead
+    of prompting again (the same contract upload-all already uses).
+
+    Inputs:  g3dt metadata upload --study ausdiab --env prod --on ec2 (types 'prod')
+    Expected Output: the dispatched remote argv contains --prod-confirmed.
+    """
+    result = runner.invoke(
+        app,
+        ["metadata", "upload", "--study", "ausdiab", "--env", "prod", "--on", "ec2"],
+        input="prod\n",
+    )
+    assert result.exit_code == 0, result.output
+    remote_argv = mock_dispatch.call_args.args[2]
+    assert "--prod-confirmed" in remote_argv
+    assert remote_argv[:2] == ["metadata", "upload"]

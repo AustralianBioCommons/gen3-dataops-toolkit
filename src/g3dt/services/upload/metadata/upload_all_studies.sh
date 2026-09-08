@@ -18,6 +18,8 @@ Arguments:
                     invoking via 'g3dt metadata upload-all'.
   --force-reupload  Passed through to upload_metadata.py: proceed even when the
                     audit table already records this project+version+endpoint.
+  --release <tag>   Passed through to upload_metadata.py: upload this release
+                    (x.y.z) of every study instead of each registry path.
 
 Run via the g3dt CLI:
   g3dt metadata upload-all \\
@@ -34,6 +36,7 @@ STUDIES=""
 ENV=""
 ALLOW_PROD="false"
 FORCE_REUPLOAD="false"
+RELEASE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --env)
             ENV="$2"
+            shift 2
+            ;;
+        --release)
+            RELEASE="$2"
             shift 2
             ;;
         --allow-prod)
@@ -101,6 +108,7 @@ for study in "${STUDY_LIST[@]}"; do
     echo "--------------------------------------------"
 
     UPLOAD_ARGS=(--study "$study" --env "$ENV")
+    [[ -n "$RELEASE" ]] && UPLOAD_ARGS+=(--release "$RELEASE")
     [[ "$FORCE_REUPLOAD" == "true" ]] && UPLOAD_ARGS+=(--force-reupload)
     # G3DT_PYTHON is exported by the g3dt CLI (runner.bash_script): the
     # interpreter that owns this g3dt installation. A bare python3 is NOT

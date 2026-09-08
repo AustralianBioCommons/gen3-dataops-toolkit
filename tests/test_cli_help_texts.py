@@ -188,3 +188,22 @@ def test_config_help_points_at_study_editing():
         assert "--dry-run" in rendered and "--no-verify" in rendered, cmd
         assert "typing the context/env name" in rendered, cmd
         assert "study repoint" in rendered, cmd
+
+
+def test_metadata_upload_help_explains_where_the_version_comes_from():
+    """
+    Background: `metadata upload --help` mentioned "project + version" but
+    offered no way to choose a version and never said the registry path
+    decides it — a dead end for a new operator.
+
+    Input:    `metadata upload --help`, `metadata upload-all --help`
+    Expected: both show --release, name `study repoint` as the registry-
+              moving alternative, and upload states the production gate.
+    """
+    for cmd in (["metadata", "upload"], ["metadata", "upload-all"]):
+        rendered = _rendered(runner.invoke(app, [*cmd, "--help"]))
+        assert "--release" in rendered, cmd
+        assert "study repoint" in rendered, cmd
+    rendered = _rendered(runner.invoke(app, ["metadata", "upload", "--help"]))
+    assert "typing the context/env name" in rendered
+    assert "--prod-confirmed" not in rendered
