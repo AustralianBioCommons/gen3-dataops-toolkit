@@ -254,6 +254,15 @@ one run, and environments deployed without the block keep the classic Gen3 set
 a manually redeployed frontend) simply omits it from the list in its wrapper
 config. `g3dt config show --env <env>` prints the resolved values.
 
+**Syncing ArgoCD is opt-in.** None of these flows runs `argocd app sync`
+unless you pass `--sync` (available on `k8s restart-schema`, `k8s restart-etl`,
+`k8s restart-ms`, `dict deploy` and `synth deploy`). Add it only when the
+commons app is behind the merged revision; a sync that fails on unrelated
+drift (for example a Job whose template changed, which Kubernetes refuses to
+patch) aborts the whole command before anything restarts. Before 5.0.0
+`restart-ms` and `synth deploy` always synced first, and `restart-ms` ignored
+`--restart-services`; both are fixed.
+
 ## Verifying download access (check-download)
 
 Registration alone does not prove a file can be downloaded. Two failure modes

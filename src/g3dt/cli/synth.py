@@ -249,6 +249,12 @@ def deploy(
         "prompting. Without this flag, deletion asks for confirmation; "
         "declining skips it and the flow continues.",
     ),
+    sync: bool = typer.Option(
+        False, "--sync",
+        help="Run 'argocd app sync' on the commons app before the ETL step [7] "
+        "(off by default since 5.0.0; add it when the app is behind the "
+        "merged revision).",
+    ),
 ) -> None:
     """Full end-to-end synthetic deploy: the whole cycle in one command.
 
@@ -262,7 +268,8 @@ def deploy(
             (--prev-version, so stale records don't linger in the commons)
       [5]   LLM-generate a new batch for the studies (provider/model from SSM)
       [6]   upload the new batch to Gen3 (scoped to --studies)
-      [7]   run the ETL cronjob (env's SSM etl_cronjob)
+      [7]   run the ETL cronjob (env's SSM etl_cronjob); with --sync the
+            ArgoCD app is synced first (never by default since 5.0.0)
 
     With --skip-dict, steps [1-3] are skipped (the schema is still fetched
     locally if missing — generation validates against it) and the flow is
@@ -312,6 +319,8 @@ def deploy(
         env_vars["G3DT_SYNTH_SKIP_DICT"] = "1"
     if skip_delete:
         env_vars["G3DT_SYNTH_SKIP_DELETE"] = "1"
+    if sync:
+        env_vars["G3DT_SYNC"] = "1"
     runner.run(
         runner.bash_script(
             "services/synthetic_data/full_deploy_dd_and_synth.sh", env

@@ -10,6 +10,10 @@ comma-separated list, restarted in order) and ``app/etl_cronjob``;
 ``--restart-services`` / ``--etl-cronjob`` override them for one run, and
 environments deployed without the block keep the classic Gen3 set
 (sheepdog, peregrine, guppy, portal / etl-cronjob).
+
+None of these commands runs ``argocd app sync`` unless ``--sync`` is passed
+(5.0.0; before that ``restart-ms`` always synced first). The flag reaches the
+wrapped scripts as ``G3DT_SYNC=1``.
 """
 from __future__ import annotations
 
@@ -36,23 +40,34 @@ _ETL_CRONJOB_HELP = (
     "ETL cronjob name; default: the env's SSM app/etl_cronjob "
     "(the CDK config's k8s.etlCronjob)."
 )
+SYNC_HELP = (
+    "Run 'argocd app sync' on the commons app before restarting (off by "
+    "default since 5.0.0; add it when the app is behind the merged revision)."
+)
 
 
 def restart_env(e, restart_services: Optional[str] = None,
-                etl_cronjob: Optional[str] = None) -> dict:
-    """script_env plus per-run restart-target overrides (flags beat SSM)."""
+                etl_cronjob: Optional[str] = None,
+                sync: bool = False) -> dict:
+    """script_env plus per-run restart overrides (flags beat SSM).
+
+    ``sync`` exports ``G3DT_SYNC=1``, which the wrapper scripts translate into
+    the ``-s`` flag of exactly one argocd_restart_*.sh call.
+    """
     env_vars = script_env(e)
     if restart_services:
         env_vars["G3DT_RESTART_SERVICES"] = restart_services
     if etl_cronjob:
         env_vars["G3DT_ETL_CRONJOB"] = etl_cronjob
+    if sync:
+        env_vars["G3DT_SYNC"] = "1"
     return env_vars
 
 
 @app.command(name="restart-schema")
 def restart_schema(
     env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    sync: bool = typer.Option(False, "--sync", help="argocd app sync first."),
+    sync: bool = typer.Option(False, "--sync", help=SYNC_HELP),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),
@@ -69,14 +84,14 @@ def restart_schema(
         args.append("-s")
     runner.run(
         runner.bash_script(_SCHEMA, *args),
-        env=restart_env(e, restart_services=restart_services),
+        env=restart_env(e, restart_services=restart_services, sync=sync),
     )
 
 
 @app.command(name="restart-etl")
 def restart_etl(
     env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
-    sync: bool = typer.Option(False, "--sync", help="argocd app sync first."),
+    sync: bool = typer.Option(False, "--sync", help=SYNC_HELP),
     etl_cronjob: Optional[str] = typer.Option(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
@@ -93,13 +108,14 @@ def restart_etl(
         args.append("-s")
     runner.run(
         runner.bash_script(_ETL, *args),
-        env=restart_env(e, etl_cronjob=etl_cronjob),
+        env=restart_env(e, etl_cronjob=etl_cronjob, sync=sync),
     )
 
 
 @app.command(name="restart-ms")
 def restart_ms(
     env: Optional[str] = typer.Option(None, "--env", "-e", help=ENV_OPT),
+    sync: bool = typer.Option(False, "--sync", help=SYNC_HELP),
     restart_services: Optional[str] = typer.Option(
         None, "--restart-services", help=_RESTART_SERVICES_HELP
     ),
@@ -107,7 +123,11 @@ def restart_ms(
         None, "--etl-cronjob", help=_ETL_CRONJOB_HELP
     ),
 ) -> None:
-    """Restart both ETL and schema microservices (wraps restart_etl_and_ms.sh).
+    """Run the ETL, then restart the schema microservices (restart_etl_and_ms.sh).
+
+    The ETL runs first (--etl-cronjob), then the services restart serially in
+    the configured order (--restart-services). Nothing is synced in ArgoCD
+    unless --sync is given.
 
     Targeting production requires typing the context/env name to confirm —
     this restarts every Gen3 microservice in the target commons.
@@ -117,5 +137,8 @@ def restart_ms(
     safety.confirm_prod_strict("kubernetes full restart", env)
     runner.run(
         runner.bash_script(_ETL_AND_MS, env),
-        env=restart_env(e, restart_services=restart_services, etl_cronjob=etl_cronjob),
+        env=restart_env(
+            e, restart_services=restart_services, etl_cronjob=etl_cronjob,
+            sync=sync,
+        ),
     )

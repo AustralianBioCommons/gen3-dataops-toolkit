@@ -118,11 +118,17 @@ def deploy(
         help="Comma-separated deployment names restarted after the upload, in "
         "order; default: the env's SSM app/restart_services.",
     ),
+    sync: bool = typer.Option(
+        False, "--sync",
+        help="Run 'argocd app sync' on the commons app before the restart "
+        "(off by default; add it when the app is behind the merged revision).",
+    ),
 ) -> None:
     """Pull + upload the dictionary and restart Gen3 schema microservices.
 
     Wraps services/dictionary/deploy_dd.sh. Requires an interactive ArgoCD SSO
-    login, so it runs locally only.
+    login, so it runs locally only. The restart never syncs the ArgoCD app
+    unless --sync is given.
 
     The version defaults to the env's `dictionary_version`, a CDK INPUT: edit
     config/<project>.<env>.json in gen3-aws-data-pipeline and `cdk deploy` to
@@ -146,6 +152,8 @@ def deploy(
     env_vars = script_env(e, _version(e, version))
     if restart_services:
         env_vars["G3DT_RESTART_SERVICES"] = restart_services
+    if sync:
+        env_vars["G3DT_SYNC"] = "1"
     runner.run(
         runner.bash_script("services/dictionary/deploy_dd.sh", env),
         env=env_vars,

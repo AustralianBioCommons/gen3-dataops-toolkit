@@ -9,7 +9,7 @@ usage() {
     echo "  -c ETL_CRONJOB The name of the ETL cronjob to run (default: \$G3DT_ETL_CRONJOB — the env's SSM app/etl_cronjob, set by g3dt — else etl-cronjob)"
     echo "  -t CONTAINER   The name of the container to check logs from (default: tube)"
     echo "  -l             Bypass login"
-    echo "  -s             Sync the argocd app before restarting resources"
+    echo "  -s             Sync the argocd app before restarting resources (off by default)"
     exit 1
 }
 

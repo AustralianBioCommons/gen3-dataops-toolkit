@@ -919,3 +919,111 @@ def test_k8s_restart_etl_flag_overrides_cronjob(mock_run, _env):
     assert result.exit_code == 0, result.output
     env = mock_run.call_args.kwargs["env"]
     assert env["G3DT_ETL_CRONJOB"] == "custom-etl"
+
+
+# --- ArgoCD sync is opt-in (5.0.0) ----------------------------------------
+
+
+@patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_k8s_restart_ms_flag_overrides_restart_services(mock_run, _env):
+    """
+    Background: restart-ms accepted --restart-services but its wrapper script
+    hardcoded the classic list, so the flag silently did nothing. The CLI
+    side of the fix is that the override must reach the script's env.
+
+    Inputs:  k8s restart-ms --env test --restart-services guppy-deployment
+    Expected Output: G3DT_RESTART_SERVICES == "guppy-deployment" in the
+    subprocess env of restart_etl_and_ms.sh.
+    """
+    result = runner.invoke(
+        app,
+        ["k8s", "restart-ms", "--env", "test",
+         "--restart-services", "guppy-deployment"],
+    )
+    assert result.exit_code == 0, result.output
+    argv = _argv(mock_run)
+    assert argv[3].endswith("services/k8s_ops/restart_etl_and_ms.sh")
+    env = mock_run.call_args.kwargs["env"]
+    assert env["G3DT_RESTART_SERVICES"] == "guppy-deployment"
+
+
+@patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_k8s_restart_ms_sync_is_opt_in(mock_run, _env):
+    """
+    Inputs:  k8s restart-ms --env test          (no --sync)
+             k8s restart-ms --env test --sync
+    Expected Output: G3DT_SYNC is absent from the script env in the first
+    run and "1" in the second — the wrapper script only passes -s (argocd
+    app sync) to its ETL call when that variable is set.
+    """
+    result = runner.invoke(app, ["k8s", "restart-ms", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    assert "G3DT_SYNC" not in mock_run.call_args.kwargs["env"]
+
+    mock_run.reset_mock()
+    result = runner.invoke(app, ["k8s", "restart-ms", "--env", "test", "--sync"])
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.kwargs["env"]["G3DT_SYNC"] == "1"
+
+
+@patch("g3dt.cli.k8s.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_k8s_restart_schema_sync_passes_flag_and_env(mock_run, _env):
+    """
+    Inputs:  k8s restart-schema --env test --sync
+    Expected Output: the argo script still receives -s in argv (its own
+    opt-in flag) AND the env carries G3DT_SYNC=1, so both routes agree.
+    """
+    result = runner.invoke(
+        app, ["k8s", "restart-schema", "--env", "test", "--sync"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "-s" in _argv(mock_run)
+    assert mock_run.call_args.kwargs["env"]["G3DT_SYNC"] == "1"
+
+
+@patch("g3dt.cli.dict_cmds.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_dict_deploy_sync_is_opt_in(mock_run, _env):
+    """
+    Inputs:  dict deploy --env test            (no --sync)
+             dict deploy --env test --sync
+    Expected Output: deploy_dd.sh gets no G3DT_SYNC by default and
+    G3DT_SYNC=1 with the flag, so its schema restart syncs ArgoCD only on
+    request.
+    """
+    result = runner.invoke(app, ["dict", "deploy", "--env", "test"])
+    assert result.exit_code == 0, result.output
+    assert "G3DT_SYNC" not in mock_run.call_args.kwargs["env"]
+
+    mock_run.reset_mock()
+    result = runner.invoke(app, ["dict", "deploy", "--env", "test", "--sync"])
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.kwargs["env"]["G3DT_SYNC"] == "1"
+
+
+@patch("g3dt.cli.synth.env_of", side_effect=_env_cfg)
+@patch("g3dt.cli._internal.runner.run")
+def test_synth_deploy_sync_is_opt_in(mock_run, _env):
+    """
+    Background: full_deploy_dd_and_synth.sh step [7] used to pass a bare -s
+    to the ETL restart, so every synth deploy began its ETL with an
+    `argocd app sync`.
+
+    Inputs:  synth deploy --env test --studies s1 --skip-delete --llm-model x
+             (no --sync)
+             ... plus --sync
+    Expected Output: G3DT_SYNC absent by default, "1" with the flag.
+    """
+    base = ["synth", "deploy", "--env", "test", "--studies", "s1",
+            "--skip-delete", "--llm-model", "claude-sonnet-5"]
+    result = runner.invoke(app, base)
+    assert result.exit_code == 0, result.output
+    assert "G3DT_SYNC" not in mock_run.call_args.kwargs["env"]
+
+    mock_run.reset_mock()
+    result = runner.invoke(app, [*base, "--sync"])
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.kwargs["env"]["G3DT_SYNC"] == "1"

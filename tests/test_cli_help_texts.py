@@ -123,9 +123,15 @@ def test_short_alias_convention_one_letter_one_meaning():
         rendered = _rendered(runner.invoke(app, cmd))
         assert short in rendered and long in rendered, f"{cmd}: {short} missing"
 
-    # the collision losers: k8s --sync and config diff --file go long-only
-    rendered = _rendered(runner.invoke(app, ["k8s", "restart-etl", "--help"]))
-    assert "--sync" in rendered and " -s " not in f" {rendered} "
+    # the collision losers: --sync (on every command that can sync ArgoCD)
+    # and config diff --file go long-only
+    for cmd in (
+        ["k8s", "restart-etl"], ["k8s", "restart-schema"], ["k8s", "restart-ms"],
+        ["dict", "deploy"], ["synth", "deploy"],
+    ):
+        rendered = _rendered(runner.invoke(app, [*cmd, "--help"]))
+        assert "--sync" in rendered, f"{cmd}: --sync missing"
+        assert " -s " not in f" {rendered} " or "--studies" in rendered, cmd
     rendered = _rendered(runner.invoke(app, ["config", "diff", "--help"]))
     assert "--file" in rendered and " -f " not in f" {rendered} "
 

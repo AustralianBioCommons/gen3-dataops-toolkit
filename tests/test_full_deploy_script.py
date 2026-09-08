@@ -62,3 +62,44 @@ def test_studies_env_var_is_required_by_the_script():
     text = DEPLOY_SH.read_text()
     assert 'G3DT_SYNTH_STUDIES:?' in text
     assert "AusDiab" not in text
+
+
+# --- ArgoCD sync is opt-in (5.0.0) ----------------------------------------
+
+RESTART_WRAPPER_SH = SERVICES / "k8s_ops" / "restart_etl_and_ms.sh"
+DEPLOY_DD_SH = SERVICES / "dictionary" / "deploy_dd.sh"
+
+
+def _flag_lines(text):
+    """Bare flag lines of a multi-line bash call, e.g. '    -s' or '    -r "x"'."""
+    return [line.strip() for line in text.splitlines() if line.strip().startswith("-")]
+
+
+def test_no_wrapper_hardcodes_argocd_sync():
+    """
+    Background: until 5.0.0 restart_etl_and_ms.sh and step [7] of the synth
+    deploy passed a bare ``-s`` to argocd_restart_etl.sh, so `k8s restart-ms`
+    and `synth deploy` always ran `argocd app sync` first — and aborted when
+    the app had unrelated drift.
+
+    Expected: no wrapper carries a literal ``-s`` line; sync is only ever
+    passed through the SYNC_ARGS array, which is empty unless G3DT_SYNC is set.
+    """
+    for script in (RESTART_WRAPPER_SH, DEPLOY_SH, DEPLOY_DD_SH):
+        text = script.read_text()
+        assert "-s" not in _flag_lines(text), f"{script.name} hardcodes -s"
+        assert 'G3DT_SYNC' in text, f"{script.name} ignores G3DT_SYNC"
+        assert '"${SYNC_ARGS[@]}"' in text, f"{script.name} never passes SYNC_ARGS"
+
+
+def test_restart_wrapper_does_not_hardcode_the_service_list():
+    """
+    Background: restart_etl_and_ms.sh used to pass
+    ``-r "sheepdog-deployment,guppy-deployment,..."`` to argocd_restart_ms.sh,
+    overriding the G3DT_RESTART_SERVICES that `--restart-services` exports.
+
+    Expected: no ``-r`` in the wrapper; the child script reads the env var.
+    """
+    flags = _flag_lines(RESTART_WRAPPER_SH.read_text())
+    assert not any(f.startswith("-r") for f in flags), flags
+    assert "sheepdog-deployment" not in RESTART_WRAPPER_SH.read_text()

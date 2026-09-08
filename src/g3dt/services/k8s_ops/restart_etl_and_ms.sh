@@ -41,16 +41,26 @@ if ! aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${REGION}"; th
     exit 1
 fi
 
+# ArgoCD sync is opt-in (g3dt --sync exports G3DT_SYNC=1) and happens once,
+# ahead of the ETL run; the schema restart below never re-syncs.
+SYNC_ARGS=()
+if [ -n "${G3DT_SYNC:-}" ]; then
+    SYNC_ARGS=(-s)
+fi
+
 echo "==== Restarting microservices (etl) ===="
 bash "${ARGO_SCRIPT_DIR}/argocd_restart_etl.sh" \
     -d "${DOMAIN}" \
     -a "${APP_NAME}" \
     -n "${NAMESPACE}" \
-    -s
+    "${SYNC_ARGS[@]}"
 
+# The restart set comes from $G3DT_RESTART_SERVICES (the env's SSM
+# app/restart_services, or the CLI's --restart-services override), which
+# argocd_restart_ms.sh reads itself — no -r here, or the flag would be ignored.
 echo "==== Restarting microservices (schema) ===="
 bash "${ARGO_SCRIPT_DIR}/argocd_restart_ms.sh" \
     -d "${DOMAIN}" \
     -a "${APP_NAME}" \
-    -n "${NAMESPACE}" \
-    -r "sheepdog-deployment,guppy-deployment,peregrine-deployment,portal-deployment"
+    -n "${NAMESPACE}"
+

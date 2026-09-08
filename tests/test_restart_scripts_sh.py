@@ -182,3 +182,97 @@ def test_etl_cronjob_name_from_env(stub_bin):
         args=("-d", "d", "-a", "a", "-n", "ns"),
     )
     assert "--from=cronjob/etl-cronjob" in recorded
+
+
+# --- restart_etl_and_ms.sh: the `g3dt k8s restart-ms` wrapper --------------
+#
+# The wrapper takes no flags: every setting arrives as a G3DT_* variable. It
+# calls argocd_restart_etl.sh and then argocd_restart_ms.sh. Two regressions
+# are pinned here. Before 5.0.0 it hardcoded ``-s`` on the ETL call (so every
+# restart-ms began with an ``argocd app sync`` that could fail on unrelated
+# drift and abort the whole run) and hardcoded ``-r <classic list>`` on the
+# ms call (so ``--restart-services`` was silently ignored).
+
+WRAPPER_ENV = {
+    "G3DT_CLUSTER_NAME": "test-cluster",
+    "G3DT_DOMAIN": "cd.example.org",
+    "G3DT_APP_NAME": "testgen3",
+    "G3DT_NAMESPACE": "cad",
+}
+
+
+def _run_wrapper(stub_bin, extra_env=None):
+    """Run restart_etl_and_ms.sh end to end against the stubs.
+
+    Unlike ``_run`` this passes no ``-l``: the wrapper has no flags, and the
+    child scripts' ``argocd login --sso`` is answered by the argocd stub.
+    ``aws eks update-kubeconfig`` is answered by an ``aws`` stub added here.
+    """
+    bin_dir, record = stub_bin
+    (bin_dir / "aws").write_text(
+        '#!/usr/bin/env bash\necho "aws $*" >> "$STUB_RECORD"\nexit 0\n'
+    )
+    (bin_dir / "aws").chmod(0o755)
+    env = dict(
+        os.environ,
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        STUB_RECORD=str(record),
+        **WRAPPER_ENV,
+    )
+    env.pop("G3DT_RESTART_SERVICES", None)
+    env.pop("G3DT_ETL_CRONJOB", None)
+    env.pop("G3DT_SYNC", None)
+    if extra_env:
+        env.update(extra_env)
+    result = subprocess.run(
+        ["bash", str(K8S_OPS / "restart_etl_and_ms.sh"), "staging"],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return record.read_text()
+
+
+def test_restart_ms_wrapper_does_not_sync_by_default(stub_bin):
+    """
+    Background: on 2026-09-08 `g3dt k8s restart-ms -e staging` failed before
+    touching any service because the wrapper always ran `argocd app sync`
+    first and the app had unrelated drift (immutable Job templates).
+
+    Inputs:  the wrapper run with the usual G3DT_* settings and NO G3DT_SYNC
+    Expected: no `argocd app sync` call at all; the ETL job is still created
+             and the services still restart.
+    """
+    recorded = _run_wrapper(stub_bin)
+    assert "app sync" not in recorded
+    assert "create job" in recorded
+    assert _restart_order(recorded) == CLASSIC
+
+
+def test_restart_ms_wrapper_syncs_once_when_asked(stub_bin):
+    """
+    Inputs:  G3DT_SYNC=1 (what `g3dt k8s restart-ms --sync` exports)
+    Expected: exactly one `argocd app sync testgen3`, and it happens before
+             the ETL job is created — the schema restart afterwards does not
+             sync again.
+    """
+    recorded = _run_wrapper(stub_bin, extra_env={"G3DT_SYNC": "1"})
+    lines = recorded.splitlines()
+    sync_lines = [i for i, l in enumerate(lines) if "app sync testgen3" in l]
+    assert len(sync_lines) == 1
+    first_job = next(i for i, l in enumerate(lines) if "create job" in l)
+    assert sync_lines[0] < first_job
+
+
+def test_restart_ms_wrapper_honours_restart_services(stub_bin):
+    """
+    Background: the wrapper used to pass a hardcoded -r list to
+    argocd_restart_ms.sh, which beat the G3DT_RESTART_SERVICES the CLI
+    exported from --restart-services, so the flag never did anything.
+
+    Inputs:  G3DT_RESTART_SERVICES=guppy-deployment
+    Expected: only guppy is restarted; none of the classic four others appear.
+    """
+    recorded = _run_wrapper(
+        stub_bin, extra_env={"G3DT_RESTART_SERVICES": "guppy-deployment"}
+    )
+    assert _restart_order(recorded) == ["guppy-deployment"]

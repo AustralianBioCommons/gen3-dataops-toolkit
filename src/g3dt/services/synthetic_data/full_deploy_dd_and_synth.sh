@@ -149,9 +149,16 @@ if [ -n "${G3DT_AWS_PROFILE:-}" ]; then
 fi
 "${G3DT_PYTHON:-python3}" "${SERVICE_DIR}/synthetic_data/upload_synth_metadata_sheepdog.py" "${UPLOAD_SYNTH_ARGS[@]}"
 
-echo "==== [7] Restarting microservices (schema and etl) ===="
+# ArgoCD sync is opt-in (g3dt --sync exports G3DT_SYNC=1); before 5.0.0 this
+# step always synced first.
+SYNC_ARGS=()
+if [ -n "${G3DT_SYNC:-}" ]; then
+    SYNC_ARGS=(-s)
+fi
+
+echo "==== [7] Running the ETL ===="
 bash "${ARGO_SCRIPT_DIR}/argocd_restart_etl.sh" \
     -d "${DOMAIN}" \
     -a "${APP_NAME}" \
     -n "${NAMESPACE}" \
-    -s
+    "${SYNC_ARGS[@]}"

@@ -13,7 +13,7 @@ usage() {
     echo "  -n NAMESPACE   The namespace for the resources (default: \$G3DT_NAMESPACE)"
     echo "  -k KIND        The kind of resource to restart (default: Deployment)"
     echo "  -l             Bypass login"
-    echo "  -s             Run 'argocd app sync' before restarts"
+    echo "  -s             Run 'argocd app sync' before restarts (off by default)"
     exit 1
 }
 

@@ -91,7 +91,8 @@ Contexts: what am I pointed at?
 Mental model: two execution planes
   - Control plane (LOCAL): dict deploy, k8s restarts. These use the interactive
     `argocd login --sso` browser flow and AWS named profiles, so they run on
-    your laptop only.
+    your laptop only. They never run `argocd app sync` unless you pass
+    --sync (add it only when the commons app is behind the merged revision).
   - Data plane (LONG jobs): metadata upload/delete, indexd register. Add
     `--on ec2` to run them on the env's job box via SSM (disconnect-safe);
     watch with `g3dt jobs status|logs <run-id> --follow`.
