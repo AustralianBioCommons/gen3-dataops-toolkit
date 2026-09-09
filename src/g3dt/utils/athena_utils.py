@@ -915,6 +915,28 @@ def write_gold_json_to_s3(
     logger.info(f"Object created at s3://{s3_bucket}/{s3_object_key}")
 
 
+def construct_data_import_order(s3_uri: str) -> list:
+    """Submission order (parents first) of the dictionary bundle at ``s3_uri``.
+
+    Kept for the aws-gen3-pipeline release-export Glue job
+    (``write_data_release_to_json.py``), which imports this name from here to
+    write each release's ``DataImportOrder.txt``. 5.0.0 moved the derivation
+    to :mod:`g3dt.import_order` and dropped the name, so any deployment with
+    ``toolkitVersion >= 5.0.0`` failed its release export with
+    ``ImportError: cannot import name 'construct_data_import_order'``.
+
+    Delegates to :func:`g3dt.import_order.derive_import_order` (a topological
+    sort of the raw bundle). Compared with the pre-5.0 gen3_validator order it
+    omits the unsubmittable ``program`` node and does not force
+    ``core_metadata_collection`` last; both are valid submission orders and
+    the upload only uses the file to sequence the node JSONs it finds.
+    """
+    from g3dt.import_order import derive_import_order
+    from g3dt.validate.validate import load_schema_from_s3_uri
+
+    return derive_import_order(load_schema_from_s3_uri(s3_uri))
+
+
 def write_release_jsons_to_s3(s3_bucket, release_id, study_id, table_name, json_data,
                               s3_client=None, key_prefix="release_jsons"):
     """
